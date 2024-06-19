@@ -28,11 +28,14 @@ class Scanner:
         self.log(f'Scanning: {self.file}...')
 
         with ZipFile(self.file, 'r') as zip: 
-            manifest = zip.read('META-INF/MANIFEST.MF').decode()
+            try: 
+                manifest = zip.read('META-INF/MANIFEST.MF').decode()
 
-            if 'Main-Class' in manifest:
-                self.log(f"{manifest[manifest.find('Main-Class:'):manifest.find('\nDev:')]}")
-            
+                if 'Main-Class' in manifest:
+                    self.log(f"{manifest[manifest.find('Main-Class:'):manifest.find('\nDev:')]}")
+            except Exception:
+                pass
+
             for file in zip.filelist:
                 if 'net/minecraft' in file.filename.lower() and not self.minecraft:
                     self.log('Jar is minecraft executable')
@@ -48,8 +51,8 @@ class Scanner:
                     match = re.search(r'(http|https|ftp)\://([a-zA-Z0-9\-\.]+\.+[a-zA-Z]{2,3})(:[a-zA-Z0-9]*)?/?([a-zA-Z0-9\-\._\?\,\'/\\\+&amp;%\$#\=~]*)[^\.\,\)\(\s]?', data)
                     if match != None:
                         link = ''.join(letter for letter in match.group(0) if letter.isprintable())
-                        self.links.append(link)
-                        self.log(f'Found link: {link}')
+                        self.links.append(f'{link} /|\ {file.filename}')
+                        self.log(f'Found link: {link} /|\ {file.filename}')
 
         self.log('Scan completed')
         self.log(f'Found {len(self.links)} links')
