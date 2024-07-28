@@ -1,31 +1,37 @@
-from zipfile import ZipFile 
-from PyQt6.QtWidgets import QLabel
 import re
+from zipfile import ZipFile
+from rich import print
 
 class Scanner:
-    def __init__(self, file: str, log_label: QLabel, report_label: QLabel):
+    def __init__(self, file: str):
         self.file = file.replace('file:///', '') # remove protocol
-        self.log_label = log_label
-        self.report_label = report_label
         self.discord = False
         self.minecraft = False
         self.scan_links = True
         self.links = []
 
-    def log(self, msg: str,):
-        print(f'[Scanner] {msg}')
-        self.log_label.setText(self.log_label.text() + f'\n{msg}')
+    def log(self, msg: str) -> None:
+        print(f'{msg}')
 
-    def report(self):
+    def good(self, msg: str) -> None:
+        self.log(f'[green]{msg}[/]')
+
+    def info(self, msg: str) -> None:
+        self.log(f'[cyan]{msg}[/]')
+
+    def report(self) -> str:
         text = ''
 
         text += f'Links: {len(self.links)}'
 
-        self.report_label.setText(text)
-        self.report_label.links = self.links
+        return text
 
-    def scan(self):
+    def scan(self) -> str:
         self.log(f'Scanning: {self.file}...')
+
+        if not self.file.endswith('.jar'):
+            self.log('File is not jar executable!')
+            return ''
 
         with ZipFile(self.file, 'r') as zip: 
             try: 
@@ -45,16 +51,19 @@ class Scanner:
                     self.log(f'Found discord rpc: {file.filename}')
                     self.discord = True
 
-                if file.filename.endswith('.class') and not 'net/minecraft' in file.filename and self.scan_links:
+                if file.filename.endswith('.class') and self.scan_links:
                     data = zip.read(file.filename).decode(errors='ignore')
 
-                    match = re.search(r'(http|https|ftp)\://([a-zA-Z0-9\-\.]+\.+[a-zA-Z]{2,3})(:[a-zA-Z0-9]*)?/?([a-zA-Z0-9\-\._\?\,\'/\\\+&amp;%\$#\=~]*)[^\.\,\)\(\s]?', data)
+                    match = re.search(r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*\b', data)
+                    
                     if match != None:
                         link = ''.join(letter for letter in match.group(0) if letter.isprintable())
-                        self.links.append(f'{link} /|\ {file.filename}')
-                        self.log(f'Found link: {link} /|\ {file.filename}')
+                        self.links.append(f'{link} | {file.filename}')
 
-        self.log('Scan completed')
-        self.log(f'Found {len(self.links)} links')
+                        if any(l in link for l in ['minecraft.org', 'optifine.net']):
+                            self.good(f'Found good link: {link} | {file.filename}')
 
-        self.report()
+                        else:
+                            self.info(f'Found link: {link} | {file.filename}')
+
+        return self.report()
