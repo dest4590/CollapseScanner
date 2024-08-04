@@ -8,7 +8,33 @@ class Scanner:
         self.discord = False
         self.minecraft = False
         self.scan_links = True
+        self.hide_good_links = True
         self.links = []
+        self.good_links = [
+            'minecraft.org', 
+            'minecraft.net',
+            'netty.io',
+            'optifine.net',
+            'mojang.com',
+            'apache.org',
+            'logging.apache.org',
+            'www.w3.org',
+            'tools.ietf.org',
+            'eclipse.org',
+            'www.openssl.org',
+            'sessionserver.mojang.com',
+            'authserver.mojang.com',
+            'api.mojang.com',
+            'shader-tutorial.dev',
+            's.optifine.net',
+            'snoop.minecraft.net',
+            'account.mojang.com',
+            'bugs.mojang.com',
+            'aka.ms',
+            'minotar.net',
+            'dominos.com',
+            'cabaletta/baritone'
+        ]
 
     def log(self, msg: str) -> None:
         print(f'{msg}')
@@ -60,10 +86,8 @@ class Scanner:
                         link = ''.join(letter for letter in match.group(0) if letter.isprintable())
                         self.links.append(f'{link} | {file.filename}')
 
-                        if any(l in link for l in ['minecraft.org', 'optifine.net']):
-                            self.good(f'Found good link: {link} | {file.filename}')
-
+                        if self.hide_good_links and any(l in link for l in self.good_links):
+                            continue
                         else:
                             self.info(f'Found link: {link} | {file.filename}')
-
         return self.report()
