@@ -6,5 +6,4 @@
 <h2 align=center>Minecraft clients scanning tool for various threats</h2>
 
 ## Showcase
-
-<img src="image/README/1718296994781.png" width=500>
+<img src="https://github.com/user-attachments/assets/08fa6c3d-b384-4e45-9e96-8ab143c6e33b" width=700>
