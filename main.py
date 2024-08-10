@@ -1,21 +1,23 @@
+from rich import print
+
 from scanner import Scanner
+
 
 class CLI:
     def __init__(self):
-        self.text = ''
+        self.menu_text = '\n[bold]CollapseScanner[/] - Minecraft clients scanning tool for various threats\n'
+        self.menu_text += '[yellow]warning:[/] scanner may give false positives, use at your own risk\n'
 
-        self.text += '1. Scan file'
+    def prompt_file_selection(self) -> str:
+        return input('Drag and drop the file here: ').strip()
 
-    def select_file(self):
-        return input('Drag n drop file here: ')
-    
-    def run(self):
-        scanner = Scanner(self.select_file())
+    def run(self) -> None:
+        print(self.menu_text)
+        file_path = self.prompt_file_selection()
+        scanner = Scanner(file_path)
         report = scanner.scan()
-
         print(report)
 
-cli = CLI()
-
 if __name__ == '__main__':
+    cli = CLI()
     cli.run()

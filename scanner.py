@@ -1,14 +1,14 @@
 import re
 from zipfile import ZipFile
-from rich import print
+
+from rich.console import Console
+
+console = Console()
 
 class Scanner:
     def __init__(self, file: str):
-        self.file = file.replace('file:///', '') # remove protocol
-        self.discord = False
-        self.minecraft = False
-        self.scan_links = True
-        self.hide_good_links = True
+        self.file = file.replace('file:///', '')  # remove protocol
+        self.options = {}
         self.links = []
         self.good_links = [
             'minecraft.org', 
@@ -33,61 +33,85 @@ class Scanner:
             'aka.ms',
             'minotar.net',
             'dominos.com',
-            'cabaletta/baritone'
+            'cabaletta/baritone',
+            'yaml.org',
+            'java.sun.org',
+            'com/viaversion/',
+            'lwjgl.org',
+            'dump.viaversion.com',
+            'docs.advntr.dev',
+            'jo0001.github.io',
+            'viaversion.com',
+            'ci.viaversion.com',
+            'paulscode/sound/',
+            'api.spiget.org'
         ]
 
     def log(self, msg: str) -> None:
-        print(f'{msg}')
-
-    def good(self, msg: str) -> None:
-        self.log(f'[green]{msg}[/]')
+        console.print(msg, highlight=False)
 
     def info(self, msg: str) -> None:
         self.log(f'[cyan]{msg}[/]')
 
     def report(self) -> str:
-        text = ''
-
-        text += f'Links: {len(self.links)}'
-
-        return text
+        options_view = '\n'.join(f'{key.capitalize()}: {"Yes" if value else "No"}' for key, value in self.options.items())
+        
+        return f'''
+Links: {len(self.links)} 
+{options_view}
+'''
 
     def scan(self) -> str:
         self.log(f'Scanning: {self.file}...')
 
         if not self.file.endswith('.jar'):
-            self.log('File is not jar executable!')
+            self.info('File is not a jar executable!')
             return ''
+        
+        with ZipFile(self.file, 'r') as zip:
+            self._process_manifest(zip)
+            self._process_files(zip)
 
-        with ZipFile(self.file, 'r') as zip: 
-            try: 
-                manifest = zip.read('META-INF/MANIFEST.MF').decode()
-
-                if 'Main-Class' in manifest:
-                    self.log(f"{manifest[manifest.find('Main-Class:'):manifest.find('\nDev:')]}")
-            except Exception:
-                pass
-
-            for file in zip.filelist:
-                if 'net/minecraft' in file.filename.lower() and not self.minecraft:
-                    self.log('Jar is minecraft executable')
-                    self.minecraft = True
-
-                if any(keyword in file.filename.lower() for keyword in ['discord', 'rpc']) and not self.discord:
-                    self.log(f'Found discord rpc: {file.filename}')
-                    self.discord = True
-
-                if file.filename.endswith('.class') and self.scan_links:
-                    data = zip.read(file.filename).decode(errors='ignore')
-
-                    match = re.search(r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*\b', data)
-                    
-                    if match != None:
-                        link = ''.join(letter for letter in match.group(0) if letter.isprintable())
-                        self.links.append(f'{link} | {file.filename}')
-
-                        if self.hide_good_links and any(l in link for l in self.good_links):
-                            continue
-                        else:
-                            self.info(f'Found link: {link} | {file.filename}')
         return self.report()
+
+    def _process_manifest(self, zip: ZipFile) -> None:
+        try:
+            manifest = zip.read('META-INF/MANIFEST.MF').decode()
+            if 'Main-Class' in manifest:
+                main_class_info = manifest[manifest.find('Main-Class:'):manifest.find('\nDev:')]
+                self.log(main_class_info)
+                
+        except Exception:
+            pass
+
+    def _process_files(self, zip: ZipFile) -> None:
+        for file in zip.filelist:
+            filename = file.filename.lower()
+            if 'net/minecraft' in filename and not self.options.get('minecraft'):
+                self.options['minecraft'] = True
+
+            if 'fabric.mod.json' in filename:
+                self.options['fabric'] = True
+                
+            if 'mods.toml' in filename:
+                self.options['forge'] = True
+
+            if any(keyword in filename for keyword in ['discord', 'rpc']) and not self.options.get('discord'):
+                self.options['discord'] = True
+
+            if file.filename.endswith('.class'):
+                self._process_class_file(zip, file.filename)
+
+    def _process_class_file(self, zip: ZipFile, filename: str) -> None:
+        data = zip.read(filename).decode(errors='ignore')
+        self._extract_links(data, filename)
+
+    def _extract_links(self, data: str, filename: str) -> None:
+        match = re.search(r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*\b', data)
+        
+        if match:
+            link = ''.join(letter for letter in match.group(0) if letter.isprintable())
+            
+            if not any(g in link for g in self.good_links):
+                self.links.append(f'{link} | {filename}')
+                self.info(f'Found link: {link} | {filename}')
