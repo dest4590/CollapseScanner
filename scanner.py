@@ -44,7 +44,8 @@ class Scanner:
             'viaversion.com',
             'ci.viaversion.com',
             'paulscode/sound/',
-            'api.spiget.org'
+            'api.spiget.org',
+            'login.live.com'
         ]
 
     def log(self, msg: str) -> None:
@@ -108,10 +109,14 @@ Links: {len(self.links)}
 
     def _extract_links(self, data: str, filename: str) -> None:
         match = re.search(r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*\b', data)
-        
         if match:
             link = ''.join(letter for letter in match.group(0) if letter.isprintable())
-            
             if not any(g in link for g in self.good_links):
                 self.links.append(f'{link} | {filename}')
                 self.info(f'Found link: {link} | {filename}')
+    
+        match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', data)  # Regex for IP addresses
+        if match:
+            ip_address = match.group(0)
+            self.links.append(f'{ip_address} | {filename}')
+            self.info(f'Found IP address: {ip_address} | {filename}')
