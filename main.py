@@ -1,7 +1,6 @@
-import os
-
 from rich import print
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm
 
 from scanner import Scanner
 
@@ -25,6 +24,12 @@ class CLI:
             report = scanner.scan()
 
         progress.print(report)
+        
+        if Confirm.ask('Would you like to visualize the links?'):
+            if scanner.links:
+                scanner.visualize_links()
+            else:
+                print('No links found!')
 
 if __name__ == '__main__':
     cli = CLI()

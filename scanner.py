@@ -1,8 +1,14 @@
+import ctypes
 import re
+import os
+from ctypes import wintypes
 from zipfile import ZipFile
 
+from pyvis.network import Network
 from rich.console import Console
 from rich.progress import Progress, TaskID
+from webview import create_window, start
+from webview.platforms.winforms import BrowserView
 
 console = Console()
 
@@ -97,7 +103,7 @@ Links: {len(self.links)}
             filename = file.filename.lower()
             index += 1
             
-            self.progress_bar.update(self.task_id, index=index)
+            self.progress_bar.update(self.task_id, advance=1)
             
             if 'net/minecraft' in filename and not self.options.get('minecraft'):
                 self.options['minecraft'] = True
@@ -129,7 +135,7 @@ Links: {len(self.links)}
             if url_match:
                 link = ''.join(letter for letter in url_match.group(0) if letter.isprintable())
                 if not any(g in link for g in self.good_links):
-                    self.links.append(f'{link} | {filename}')
+                    self.links.append((filename, link))
                     self.info(f'Found link: {link} | {filename}')
             
             # Regex for IP addresses
@@ -137,7 +143,42 @@ Links: {len(self.links)}
             
             if ip_match:
                 ip_address = ip_match.group(0)
-                self.links.append(f'{ip_address} | {filename}')
+                self.links.append((filename, ip_address))
                 self.info(f'Found IP address: {ip_address} | {filename}')
         except Exception as e:
             self.log(f"Error extracting links from {filename}: {e}")
+
+    def visualize_links(self):
+        net = Network(directed=True, bgcolor="#333333", font_color="white")
+
+        for filename, link in self.links:
+            net.add_node(filename, label=filename)
+            net.add_node(link, label=link)
+            net.add_edge(filename, link)
+
+        html_file = "links_visualization.html"
+        
+        net.show(html_file)
+        
+        css_file_path = os.path.join("assets", "custom_styles.css")
+
+        with open(css_file_path, "r") as css_file:
+            css_content = css_file.read()
+
+        with open(html_file, "r+") as buffer:
+            html_content = buffer.read()
+            buffer.seek(0, 0)
+            buffer.write(f"""<style>{css_content}</style>\n{html_content}""")
+            
+        window = create_window('Links visualization', html_file)
+        
+        dwmapi = ctypes.windll.LoadLibrary("dwmapi")
+        
+        window.events.shown += lambda: dwmapi.DwmSetWindowAttribute(
+            BrowserView.instances[window.uid].Handle.ToInt32(),
+            20,
+            ctypes.byref(ctypes.c_bool(True)),
+            ctypes.sizeof(wintypes.BOOL),
+        )
+        
+        start()
