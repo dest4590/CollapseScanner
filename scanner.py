@@ -1,14 +1,16 @@
 import ctypes
-import re
 import os
+import re
 from ctypes import wintypes
 from zipfile import ZipFile
 
 from pyvis.network import Network
 from rich.console import Console
 from rich.progress import Progress, TaskID
-from webview import create_window, start
+from webview import Window, create_window, start
 from webview.platforms.winforms import BrowserView
+
+from database import good_links
 
 console = Console()
 
@@ -19,44 +21,8 @@ class Scanner:
         self.task_id = task_id
         self.options = {}
         self.links = []
-        self.good_links = [
-            'minecraft.org', 
-            'minecraft.net',
-            'netty.io',
-            'optifine.net',
-            'mojang.com',
-            'apache.org',
-            'logging.apache.org',
-            'www.w3.org',
-            'tools.ietf.org',
-            'eclipse.org',
-            'www.openssl.org',
-            'sessionserver.mojang.com',
-            'authserver.mojang.com',
-            'api.mojang.com',
-            'shader-tutorial.dev',
-            's.optifine.net',
-            'snoop.minecraft.net',
-            'account.mojang.com',
-            'bugs.mojang.com',
-            'aka.ms',
-            'minotar.net',
-            'dominos.com',
-            'cabaletta/baritone',
-            'yaml.org',
-            'java.sun.org',
-            'com/viaversion/',
-            'lwjgl.org',
-            'dump.viaversion.com',
-            'docs.advntr.dev',
-            'jo0001.github.io',
-            'viaversion.com',
-            'ci.viaversion.com',
-            'paulscode/sound/',
-            'api.spiget.org',
-            'login.live.com',
-            'slf4j.org',
-        ]
+        self.good_links = good_links
+        self.linux = os.name == 'posix'
 
     def log(self, msg: str) -> None:
         self.progress_bar.print(msg, highlight=False)
@@ -148,8 +114,19 @@ Links: {len(self.links)}
         except Exception as e:
             self.log(f"Error extracting links from {filename}: {e}")
 
+    def configure_window(self, window: Window) -> None:
+        dwmapi = ctypes.windll.LoadLibrary("dwmapi")
+        hwnd = BrowserView.instances[window.uid].Handle.ToInt32()
+
+        dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            20,
+            ctypes.byref(ctypes.c_bool(True)),
+            ctypes.sizeof(wintypes.BOOL),
+        )
+
     def visualize_links(self):
-        net = Network(directed=True, bgcolor="#333333", font_color="white")
+        net = Network(directed=True, bgcolor="#333333", font_color="white", layout=True)
 
         for filename, link in self.links:
             net.add_node(filename, label=filename)
@@ -157,6 +134,15 @@ Links: {len(self.links)}
             net.add_edge(filename, link)
 
         html_file = "links_visualization.html"
+        
+        net.options = {
+            "physics": {
+                "repulsion": {
+                    "centralGravity": 0.6,
+                },
+                "solver": "repulsion"
+            }
+        }
         
         net.show(html_file)
         
@@ -172,13 +158,7 @@ Links: {len(self.links)}
             
         window = create_window('Links visualization', html_file)
         
-        dwmapi = ctypes.windll.LoadLibrary("dwmapi")
-        
-        window.events.shown += lambda: dwmapi.DwmSetWindowAttribute(
-            BrowserView.instances[window.uid].Handle.ToInt32(),
-            20,
-            ctypes.byref(ctypes.c_bool(True)),
-            ctypes.sizeof(wintypes.BOOL),
-        )
+        if not self.linux:
+            window.events.shown += lambda: self.configure_window(window)
         
         start()

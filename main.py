@@ -25,7 +25,7 @@ class CLI:
 
         progress.print(report)
         
-        if Confirm.ask('Would you like to visualize the links?'):
+        if Confirm.ask('Would you like to visualize the links?', default=True):
             if scanner.links:
                 scanner.visualize_links()
             else:
