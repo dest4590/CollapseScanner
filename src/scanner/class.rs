@@ -1,6 +1,8 @@
 use rayon::prelude::*;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use once_cell::sync::Lazy;
 
 use crate::detection::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
 use crate::errors::ScanError;
@@ -18,6 +20,12 @@ const MIN_BASE64_BLOB_LEN: usize = 512;
 const MIN_HEX_BLOB_LEN: usize = 1024;
 const BASE64_ENTROPY_THRESHOLD: f64 = 5.0;
 const HEX_ENTROPY_THRESHOLD: f64 = 3.8;
+
+static REFLECTIVE_CLASS_LOADING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)class\.forname\s*\(").unwrap());
+static REFLECTIVE_METHOD_ACCESS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)getmethod|getdeclaredmethod").unwrap());
+static DIRECT_MEMORY_ACCESS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)sun\.misc\.unsafe|jdk\.internal\.misc\.unsafe").unwrap());
+static BYTECODE_INVOCATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)invokestatic|invokespecial|invokevirtual").unwrap());
+static GENERIC_TYPE_MANIPULATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)creatensforprefix|genericsignature").unwrap());
 
 impl CollapseScanner {
     const MAX_SCAN_STRING_LEN: usize = 2048;
@@ -54,12 +62,14 @@ impl CollapseScanner {
     ) -> Result<Option<ScanResult>, ScanError> {
         let data_hash = calculate_detection_hash(data);
 
-        if let Some(cached_findings) = self.get_cached_findings(data_hash) {
-            return self.handle_cached_findings(
-                cached_findings.clone(),
-                original_path_str,
-                resource_info,
-            );
+        if let Ok(cache) = self.result_cache.read() {
+            if let Some(cached_findings) = cache.get(&data_hash) {
+                return self.handle_cached_findings(
+                    cached_findings.clone(),
+                    original_path_str,
+                    resource_info,
+                );
+            }
         }
 
         let mut findings = Vec::new();
@@ -87,9 +97,10 @@ impl CollapseScanner {
         self.scan_strings_by_mode(&strings_to_scan, &mut findings);
         self.normalize_findings(&mut findings);
 
-        let _cached_arc = self
-            .result_cache
-            .get_with(data_hash, || Arc::new(findings.clone()));
+        let findings_arc = std::sync::Arc::new(findings.clone());
+        if let Ok(mut cache) = self.result_cache.write() {
+            cache.insert(data_hash, findings_arc.clone());
+        }
 
         self.create_scan_result(findings, class_details, original_path_str, resource_info)
     }
@@ -125,13 +136,19 @@ impl CollapseScanner {
     }
 
     fn is_local_host(&self, host: &str) -> bool {
-        let lower = host.to_lowercase();
-        matches!(lower.as_str(), "localhost" | "127.0.0.1" | "::1")
-            || lower.ends_with(".local")
-            || lower.ends_with(".lan")
-            || lower.ends_with(".internal")
-            || lower.ends_with(".home")
-            || lower.ends_with(".localdomain")
+        let equals_ignore_case = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+        let ends_with_ignore_case = |a: &str, suffix: &str| {
+            a.len() >= suffix.len() && a[a.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        };
+
+        equals_ignore_case(host, "localhost")
+            || host == "127.0.0.1"
+            || host == "::1"
+            || ends_with_ignore_case(host, ".local")
+            || ends_with_ignore_case(host, ".lan")
+            || ends_with_ignore_case(host, ".internal")
+            || ends_with_ignore_case(host, ".home")
+            || ends_with_ignore_case(host, ".localdomain")
     }
 
     fn check_suspicious_url_patterns(
@@ -141,7 +158,7 @@ impl CollapseScanner {
     ) {
         for cap in URL_REGEX.captures_iter(string) {
             let url_str = &cap[0];
-            let domain = extract_domain(url_str).to_lowercase();
+            let domain = extract_domain(url_str);
 
             if domain.is_empty() {
                 continue;
@@ -164,16 +181,14 @@ impl CollapseScanner {
     }
 
     fn is_suspicious_domain(&self, domain: &str) -> bool {
-        let lower_domain = domain.to_lowercase();
-
-        if self.suspicious_domains.contains(&lower_domain) {
+        if self.suspicious_domains.contains(domain) {
             return true;
         }
 
         self.suspicious_domains.iter().any(|suspicious| {
-            lower_domain.ends_with(suspicious)
-                && (lower_domain.len() == suspicious.len()
-                    || lower_domain.as_bytes()[lower_domain.len() - suspicious.len() - 1] == b'.')
+            domain.ends_with(suspicious)
+                && (domain.len() == suspicious.len()
+                    || domain.as_bytes()[domain.len() - suspicious.len() - 1] == b'.')
         })
     }
 
@@ -185,6 +200,23 @@ impl CollapseScanner {
                 findings.push((
                     FindingType::SuspiciousKeyword,
                     format!("'{}' in \"{}\"", keyword, truncate_string(string, 80)),
+                ));
+            }
+        }
+
+        let reflective_patterns = [
+            (&*REFLECTIVE_CLASS_LOADING, "Reflective class loading"),
+            (&*REFLECTIVE_METHOD_ACCESS, "Reflective method access"),
+            (&*DIRECT_MEMORY_ACCESS, "Direct memory access"),
+            (&*BYTECODE_INVOCATION, "Bytecode invocation"),
+            (&*GENERIC_TYPE_MANIPULATION, "Generic type manipulation"),
+        ];
+
+        for (pattern, desc) in reflective_patterns {
+            if pattern.is_match(string) {
+                findings.push((
+                    FindingType::SuspiciousApi,
+                    format!("{}: {}", desc, truncate_string(string, 60)),
                 ));
             }
         }
@@ -215,88 +247,117 @@ impl CollapseScanner {
         )
     }
 
-    fn check_encoded_payloads(&self, string: &str, findings: &mut Vec<(FindingType, String)>) {
-        let candidate = string.trim();
-        if candidate.len() < MIN_BASE64_BLOB_LEN {
-            return;
+    fn analyze_base64_candidate(&self, input: &str) -> Option<f64> {
+        if input.len() < MIN_BASE64_BLOB_LEN || input.len() % 4 != 0 {
+            return None;
         }
 
-        if self.looks_like_base64_blob(candidate) {
-            findings.push((
-                FindingType::EncodedPayload,
-                format!("High-entropy Base64-like blob ({} chars)", candidate.len()),
-            ));
-            return;
-        }
-
-        if self.looks_like_hex_blob(candidate) {
-            findings.push((
-                FindingType::EncodedPayload,
-                format!("High-entropy hex blob ({} chars)", candidate.len()),
-            ));
-        }
-    }
-
-    fn looks_like_base64_blob(&self, input: &str) -> bool {
-        if input.len() < MIN_BASE64_BLOB_LEN || !input.len().is_multiple_of(4) {
-            return false;
-        }
-
+        let mut counts = [0usize; 256];
         let mut has_upper = false;
         let mut has_lower = false;
         let mut has_digit = false;
 
         for byte in input.bytes() {
             match byte {
-                b'A'..=b'Z' => has_upper = true,
-                b'a'..=b'z' => has_lower = true,
-                b'0'..=b'9' => has_digit = true,
-                b'+' | b'/' | b'=' => {}
-                _ => return false,
+                b'A'..=b'Z' => {
+                    has_upper = true;
+                    counts[byte as usize] += 1;
+                }
+                b'a'..=b'z' => {
+                    has_lower = true;
+                    counts[byte as usize] += 1;
+                }
+                b'0'..=b'9' => {
+                    has_digit = true;
+                    counts[byte as usize] += 1;
+                }
+                b'+' | b'/' | b'=' => {
+                    counts[byte as usize] += 1;
+                }
+                _ => return None,
             }
         }
 
         let padding_len = input.bytes().rev().take_while(|byte| *byte == b'=').count();
         if padding_len > 2 || !has_upper || !has_lower || !has_digit {
-            return false;
+            return None;
         }
 
-        self.estimate_entropy(input) >= BASE64_ENTROPY_THRESHOLD
+        let len = input.len() as f64;
+        let entropy = counts
+            .iter()
+            .filter(|&&count| count > 0)
+            .fold(0.0, |entropy, &count| {
+                let probability = count as f64 / len;
+                entropy - probability * probability.log2()
+            });
+
+        Some(entropy)
     }
 
-    fn looks_like_hex_blob(&self, input: &str) -> bool {
-        if input.len() < MIN_HEX_BLOB_LEN || !input.len().is_multiple_of(2) {
-            return false;
+    fn analyze_hex_candidate(&self, input: &str) -> Option<f64> {
+        if input.len() < MIN_HEX_BLOB_LEN || input.len() % 2 != 0 {
+            return None;
         }
 
+        let mut counts = [0usize; 256];
         let mut has_alpha = false;
         let mut has_digit = false;
 
         for byte in input.bytes() {
             match byte {
-                b'0'..=b'9' => has_digit = true,
-                b'a'..=b'f' | b'A'..=b'F' => has_alpha = true,
-                _ => return false,
+                b'0'..=b'9' => {
+                    has_digit = true;
+                    counts[byte as usize] += 1;
+                }
+                b'a'..=b'f' | b'A'..=b'F' => {
+                    has_alpha = true;
+                    counts[byte as usize] += 1;
+                }
+                _ => return None,
             }
         }
 
-        has_alpha && has_digit && self.estimate_entropy(input) >= HEX_ENTROPY_THRESHOLD
-    }
-
-    fn estimate_entropy(&self, input: &str) -> f64 {
-        let mut counts = [0usize; 256];
-        for byte in input.bytes() {
-            counts[byte as usize] += 1;
+        if !has_alpha || !has_digit {
+            return None;
         }
 
         let len = input.len() as f64;
-        counts
+        let entropy = counts
             .iter()
-            .filter(|count| **count > 0)
-            .fold(0.0, |entropy, count| {
-                let probability = *count as f64 / len;
+            .filter(|&&count| count > 0)
+            .fold(0.0, |entropy, &count| {
+                let probability = count as f64 / len;
                 entropy - probability * probability.log2()
-            })
+            });
+
+        Some(entropy)
+    }
+
+    fn check_encoded_payloads(&self, string: &str, findings: &mut Vec<(FindingType, String)>) {
+        let candidate = string.trim();
+        if candidate.len() < MIN_BASE64_BLOB_LEN {
+            return;
+        }
+
+        if let Some(entropy) = self.analyze_base64_candidate(candidate) {
+            if entropy >= BASE64_ENTROPY_THRESHOLD {
+                findings.push((
+                    FindingType::EncodedPayload,
+                    format!("High-entropy Base64-like blob ({} chars)", candidate.len()),
+                ));
+                return;
+            }
+        }
+
+        if let Some(entropy) = self.analyze_hex_candidate(candidate) {
+            if entropy >= HEX_ENTROPY_THRESHOLD {
+                findings.push((
+                    FindingType::EncodedPayload,
+                    format!("High-entropy hex blob ({} chars)", candidate.len()),
+                ));
+            }
+        }
     }
 
     fn check_all_patterns(&self, string: &str, findings: &mut Vec<(FindingType, String)>) -> bool {
@@ -411,13 +472,11 @@ impl CollapseScanner {
     }
 
     fn is_good_link(&self, domain: &str) -> bool {
-        let lower_domain = domain.to_lowercase();
-
-        if self.good_links.contains(&lower_domain) {
+        if self.good_links.contains(domain) {
             return true;
         }
 
-        let parts: Vec<&str> = lower_domain.split('.').collect();
+        let parts: Vec<&str> = domain.split('.').collect();
         for i in 1..parts.len() {
             let parent_domain = parts[i..].join(".");
             if self.good_links.contains(&parent_domain) {
@@ -426,10 +485,6 @@ impl CollapseScanner {
         }
 
         false
-    }
-
-    fn get_cached_findings(&self, hash: u64) -> Option<Arc<Vec<(FindingType, String)>>> {
-        self.result_cache.get(&hash)
     }
 
     pub(crate) fn normalize_findings(&self, findings: &mut Vec<(FindingType, String)>) {
@@ -745,9 +800,9 @@ impl CollapseScanner {
         }
 
         let findings_arc = Arc::new(findings.to_owned());
-        let _ = self
-            .result_cache
-            .get_with(data_hash, || findings_arc.clone());
+        if let Ok(mut cache) = self.result_cache.write() {
+            cache.insert(data_hash, findings_arc.clone());
+        }
 
         self.build_scan_result(findings_arc, original_path_str, resource_info, None)
     }

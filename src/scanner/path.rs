@@ -17,12 +17,38 @@ fn has_extension(path: &Path, exts: &[&str]) -> bool {
         .is_some_and(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
+fn glob_matches(path: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.starts_with("*") && !pattern[1..].contains('*') {
+        return path.ends_with(&pattern[1..]);
+    }
+
+    if pattern.ends_with("/*") {
+        let dir = &pattern[..pattern.len() - 2];
+        return path.starts_with(dir) && path[dir.len()..].starts_with('/');
+    }
+
+    if pattern.ends_with("/**") {
+        let dir = &pattern[..pattern.len() - 3];
+        return path.starts_with(dir);
+    }
+
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return path.contains(pattern);
+    }
+
+    path == pattern
+}
+
 impl CollapseScanner {
     pub(crate) fn should_scan(&self, internal_path: &str) -> bool {
         if self
             .exclude_patterns
             .iter()
-            .any(|pattern| pattern.matches(internal_path))
+            .any(|pattern| glob_matches(internal_path, pattern))
         {
             if self.options.verbose {
                 println!("[-] Skipping excluded file: {}", internal_path);
@@ -34,7 +60,7 @@ impl CollapseScanner {
             let matches = self
                 .find_patterns
                 .iter()
-                .any(|pattern| pattern.matches(internal_path));
+                .any(|pattern| glob_matches(internal_path, pattern));
 
             if !matches {
                 return false;

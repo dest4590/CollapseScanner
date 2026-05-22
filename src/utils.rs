@@ -1,5 +1,3 @@
-use url::Url;
-
 pub fn truncate_string(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_owned()
@@ -11,27 +9,29 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 pub fn extract_domain(url_str: &str) -> String {
-    if let Ok(url) = Url::parse(url_str) {
-        if let Some(host) = url.host_str() {
-            return host.trim_start_matches("www.").to_lowercase();
-        }
+    let mut working_str = url_str.trim();
+
+    if let Some(proto_end) = working_str.find("://") {
+        working_str = &working_str[proto_end + 3..];
+    } else if working_str.starts_with("//") {
+        working_str = &working_str[2..];
     }
 
-    if (!url_str.contains("://") && url_str.contains('.')) || url_str.starts_with("//") {
-        let prefixed = if url_str.starts_with("//") {
-            format!("http:{}", url_str)
-        } else {
-            format!("http://{}", url_str)
-        };
-
-        if let Ok(url) = Url::parse(&prefixed) {
-            if let Some(host) = url.host_str() {
-                return host.trim_start_matches("www.").to_lowercase();
-            }
-        }
+    if let Some(path_start) = working_str.find('/') {
+        working_str = &working_str[..path_start];
     }
 
-    String::new()
+    if let Some(port_start) = working_str.find(':') {
+        working_str = &working_str[..port_start];
+    }
+
+    if let Some(at_pos) = working_str.find('@') {
+        working_str = &working_str[at_pos + 1..];
+    }
+
+    let domain = working_str.trim_start_matches("www.");
+
+    domain.to_lowercase()
 }
 
 pub fn get_simple_name(fqn: &str) -> &str {

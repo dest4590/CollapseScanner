@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use indicatif::{ProgressBar, ProgressStyle};
 use zip::ZipArchive;
 
 use crate::config::SYSTEM_CONFIG;
@@ -39,14 +38,6 @@ impl CollapseScanner {
         }
 
         let max_entry_size = SYSTEM_CONFIG.max_file_size * 1024 * 1024;
-
-        let pb_template = "[*] [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} ({percent}%) Processing: {msg}";
-        let progress_bar = Arc::new(Mutex::new(ProgressBar::new(total_files as u64)));
-        progress_bar.lock().unwrap().set_style(
-            ProgressStyle::default_bar()
-                .template(pb_template)?
-                .progress_chars("=>-"),
-        );
 
         let processed_count = Arc::new(AtomicUsize::new(0));
         if let Some(ref prog_arc) = self.options.progress {
@@ -115,7 +106,6 @@ impl CollapseScanner {
                 let compressed_size = archive_file.compressed_size();
                 let arc_buf = Arc::new(buffer);
                 let name_clone = original_entry_name;
-                let progress_bar_clone = progress_bar.clone();
                 let processed_count_clone = processed_count.clone();
                 let results_clone = results_arc.clone();
 
@@ -124,7 +114,6 @@ impl CollapseScanner {
                         &name_clone,
                         arc_buf.as_ref(),
                         compressed_size,
-                        &progress_bar_clone,
                         &processed_count_clone,
                     ) {
                         results_clone.lock().unwrap().append(&mut entry_results);
@@ -138,12 +127,14 @@ impl CollapseScanner {
             .into_inner()
             .unwrap();
 
-        progress_bar.lock().unwrap().finish_with_message(format!(
-            "Finished processing {} files ({} skipped, {} analyzed)",
-            total_files,
-            skipped_count,
-            processed_count.load(Ordering::Relaxed)
-        ));
+        if self.options.verbose {
+            println!(
+                "[+] JAR scan completed in {:.2}s ({} skipped, {} analyzed)",
+                start_time.elapsed().as_secs_f64(),
+                skipped_count,
+                processed_count.load(Ordering::Relaxed)
+            );
+        }
 
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
@@ -170,13 +161,8 @@ impl CollapseScanner {
         original_entry_name: &str,
         buffer: &[u8],
         compressed_size: u64,
-        progress_bar: &Arc<Mutex<ProgressBar>>,
         processed_count: &Arc<AtomicUsize>,
     ) -> Result<Vec<ScanResult>, ScanError> {
-        progress_bar
-            .lock()
-            .unwrap()
-            .set_message(original_entry_name.to_string());
 
         let scan_results = self.scan_archive_entry_contents(
             original_entry_name,
@@ -197,8 +183,6 @@ impl CollapseScanner {
                 gp.message = original_entry_name.to_string();
             }
         }
-
-        progress_bar.lock().unwrap().inc(1);
 
         Ok(scan_results)
     }
@@ -349,13 +333,15 @@ impl CollapseScanner {
     }
 
     fn create_oversized_entry_result(&self, entry_name: &str, size: u64) -> Option<ScanResult> {
-        let lower_name = entry_name.to_ascii_lowercase();
-        let is_class_candidate = lower_name.ends_with(".class") || lower_name.ends_with(".class/");
+        let ends_with_ignore_case = |s: &str, suffix: &str| {
+            s.len() >= suffix.len() && a_ends_with_b_case_insensitive(s, suffix)
+        };
+        let is_class_candidate = ends_with_ignore_case(entry_name, ".class") || ends_with_ignore_case(entry_name, ".class/");
         let is_interesting_resource = is_class_candidate
-            || self.has_extension(&lower_name, NESTED_ARCHIVE_EXTENSIONS)
-            || self.has_extension(&lower_name, SCRIPT_RESOURCE_EXTENSIONS)
-            || self.has_extension(&lower_name, EXECUTABLE_RESOURCE_EXTENSIONS)
-            || self.has_extension(&lower_name, NATIVE_LIBRARY_EXTENSIONS);
+            || self.has_extension(entry_name, NESTED_ARCHIVE_EXTENSIONS)
+            || self.has_extension(entry_name, SCRIPT_RESOURCE_EXTENSIONS)
+            || self.has_extension(entry_name, EXECUTABLE_RESOURCE_EXTENSIONS)
+            || self.has_extension(entry_name, NATIVE_LIBRARY_EXTENSIONS);
 
         if !is_interesting_resource {
             return None;
@@ -369,7 +355,7 @@ impl CollapseScanner {
             ),
         )];
 
-        if self.has_extension(&lower_name, NATIVE_LIBRARY_EXTENSIONS) {
+        if self.has_extension(entry_name, NATIVE_LIBRARY_EXTENSIONS) {
             findings.push((
                 FindingType::NativeLibrary,
                 format!("Oversized native library resource: {}", entry_name),
@@ -404,24 +390,23 @@ impl CollapseScanner {
         buffer: &[u8],
         compressed_size: Option<u64>,
     ) -> Vec<(FindingType, String)> {
-        let lower_name = resource_name.to_ascii_lowercase();
         let mut findings = Vec::new();
 
-        if self.has_extension(&lower_name, SCRIPT_RESOURCE_EXTENSIONS) {
+        if self.has_extension(resource_name, SCRIPT_RESOURCE_EXTENSIONS) {
             findings.push((
                 FindingType::SuspiciousArchiveEntry,
                 format!("Embedded script resource: {}", resource_name),
             ));
         }
 
-        if self.has_extension(&lower_name, EXECUTABLE_RESOURCE_EXTENSIONS) {
+        if self.has_extension(resource_name, EXECUTABLE_RESOURCE_EXTENSIONS) {
             findings.push((
                 FindingType::SuspiciousArchiveEntry,
                 format!("Embedded executable resource: {}", resource_name),
             ));
         }
 
-        if self.has_extension(&lower_name, NATIVE_LIBRARY_EXTENSIONS) {
+        if self.has_extension(resource_name, NATIVE_LIBRARY_EXTENSIONS) {
             findings.push((
                 FindingType::NativeLibrary,
                 format!("Embedded native library: {}", resource_name),
@@ -429,7 +414,7 @@ impl CollapseScanner {
         }
 
         if let Some(binary_kind) = Self::detect_binary_magic(buffer) {
-            let finding_type = if self.has_extension(&lower_name, NATIVE_LIBRARY_EXTENSIONS) {
+            let finding_type = if self.has_extension(resource_name, NATIVE_LIBRARY_EXTENSIONS) {
                 FindingType::NativeLibrary
             } else {
                 FindingType::SuspiciousArchiveEntry
@@ -444,7 +429,7 @@ impl CollapseScanner {
             ));
         }
 
-        if lower_name == "meta-inf/manifest.mf" {
+        if resource_name.eq_ignore_ascii_case("meta-inf/manifest.mf") {
             self.inspect_manifest(resource_name, buffer, &mut findings);
         }
 
@@ -502,8 +487,7 @@ impl CollapseScanner {
     }
 
     fn should_recurse_into_archive(&self, resource_name: &str, buffer: &[u8]) -> bool {
-        let lower_name = resource_name.to_ascii_lowercase();
-        self.has_extension(&lower_name, NESTED_ARCHIVE_EXTENSIONS) || Self::has_zip_magic(buffer)
+        self.has_extension(resource_name, NESTED_ARCHIVE_EXTENSIONS) || Self::has_zip_magic(buffer)
     }
 
     fn has_extension(&self, resource_name: &str, extensions: &[&str]) -> bool {
@@ -560,4 +544,8 @@ impl CollapseScanner {
             is_dead_class_candidate,
         })
     }
+}
+
+fn a_ends_with_b_case_insensitive(a: &str, b: &str) -> bool {
+    a.len() >= b.len() && a[a.len() - b.len()..].eq_ignore_ascii_case(b)
 }

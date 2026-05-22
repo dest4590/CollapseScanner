@@ -1,34 +1,41 @@
-use ipnet::IpNet;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-lazy_static::lazy_static! {
-    /// IPv4 address regex
-    pub static ref IP_REGEX: Regex = Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
+pub static IP_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap()
+});
 
-    /// IPv6 address regex (simple/fast heuristic)
-    pub static ref IPV6_REGEX: Regex = Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap();
+pub static IPV6_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap());
 
-    /// URL detection regex (captures many common URL forms)
-    pub static ref URL_REGEX: Regex = Regex::new(r#"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^
-\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^
-\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'".,<>?«»""']))"#).unwrap();
+pub static URL_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:https?://|ftp://|www\.)(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[^\s]*)?"#).unwrap()
+});
 
-    /// Generic malicious / suspicious pattern keywords
-    pub static ref MALICIOUS_PATTERN_REGEX: Regex = Regex::new(r"(?i)\b(powershell|cmd(?:\.exe)?|/bin/(?:ba)?sh|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|loadLibrary|System\.load|defineClass|setAccessible|VirtualMachine\.attach|keylogger|clipboard|appdata|\.minecraft|token|password|webhook)\b").unwrap();
+pub static MALICIOUS_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(powershell|cmd(?:\.exe)?|/bin/(?:ba)?sh|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|loadLibrary|System\.load|defineClass|setAccessible|VirtualMachine\.attach|keylogger|clipboard|appdata|\.minecraft|webhook|invoke|reflection|forName|getMethod|getDeclaredMethod|setAccessible|readFile|writeFile|decrypt|encrypt)\b").unwrap()
+});
 
-    /// High-confidence credential/token literals frequently found in malware configs.
-    pub static ref SECRET_REGEX: Regex = Regex::new(r#"(?x)
+pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?x)
         (?i)\b(?:mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})\b
         |
         \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
         |
-        (?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd)\s*[:=]\s*['"]?[A-Za-z0-9_./+=:-]{16,}
-    "#).unwrap();
+        (?i)\b(?:AKIA[0-9A-Z]{16}|aws[_-]?(?:access[_-]?key|secret))\b
+        |
+        (?i)\b(?:gh[pousr]_[A-Za-z0-9_]{36,255})\b
+        |
+        (?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|api[_-]?secret)\s*[:=]\s*['"]?[A-Za-z0-9_./+=:-]{16,}
+        |
+        (?i)\b(?:webhook|slack|discord)[_-]?(?:url|token|hook)\s*[:=]\s*['"]?https?://[^'"\s]+
+    "#).unwrap()
+});
 
-    /// Known "good" links / domains
-    pub static ref GOOD_LINKS: HashSet<String> = [
+pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
+    [
         "account.mojang.com",
         "aka.ms",
         "apache.org",
@@ -72,64 +79,89 @@ lazy_static::lazy_static! {
     ]
     .into_iter()
     .map(str::to_owned)
-    .collect();
+    .collect()
+});
 
-    /// Known "good" / unreachable / reserved IPs and ranges
-    pub static ref GOOD_IPS: HashSet<&'static str> = [
-        // Unspecified / non-routable
+pub static GOOD_IPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
         "0.0.0.0",
         "::",
-        // Loopback
         "127.0.0.1",
         "::1",
-        // Broadcast
         "255.255.255.255",
-        // Link-local
         "169.254.0.0/16",
-        // Documentation / TEST-NET (RFC 5737)
         "192.0.2.0/24",
         "198.51.100.0/24",
         "203.0.113.0/24",
-        // Private ranges
         "10.0.0.0/8",
         "172.16.0.0/12",
         "192.168.0.0/16",
-        // Minecraft UDP multicast
         "224.0.2.60",
-        // Public DNS resolvers
         "8.8.8.8",
         "8.8.4.4",
         "1.1.1.1",
         "9.9.9.9",
-    ].into_iter().collect();
+    ]
+    .into_iter()
+    .collect()
+});
 
-    pub static ref GOOD_IP_ADDRS: HashSet<IpAddr> = GOOD_IPS
-        .iter()
-        .filter(|s| !s.contains('/'))
-        .filter_map(|s| s.parse::<IpAddr>().ok())
-        .collect();
-
-    pub static ref GOOD_IP_NETWORKS: Vec<IpNet> = GOOD_IPS
-        .iter()
-        .filter(|s| s.contains('/'))
-        .filter_map(|s| s.parse::<IpNet>().ok())
-        .collect();
-}
-
-/// Returns `true` if `ip` is a known good IP address or in a known good range.
-pub fn is_known_good_ip(ip: &str) -> bool {
-    match ip.parse::<IpAddr>() {
-        Ok(addr) => {
-            if GOOD_IP_ADDRS.contains(&addr) {
-                return true;
-            }
-            GOOD_IP_NETWORKS.iter().any(|net| net.contains(&addr))
-        }
-        Err(_) => false,
+fn parse_ip_range(range_str: &str) -> Option<(u32, u32)> {
+    if !range_str.contains('/') {
+        return None;
     }
+    let parts: Vec<&str> = range_str.split('/').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let ip_parts: Vec<u32> = parts[0]
+        .split('.')
+        .map(|p| p.parse::<u32>().unwrap_or(0))
+        .collect();
+    if ip_parts.len() != 4 {
+        return None;
+    }
+    let ip = (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3];
+    let prefix = parts[1].parse::<u32>().ok()?;
+    if prefix > 32 {
+        return None;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        0xffffffff << (32 - prefix)
+    };
+    Some((ip & mask, mask))
 }
 
-/// Returns `true` if `ip` is a public, routable IPv4 or IPv6 address.
+fn ip_in_range(ip_str: &str, range_str: &str) -> bool {
+    if let Ok(addr) = ip_str.parse::<IpAddr>() {
+        if let IpAddr::V4(v4) = addr {
+            let octets = v4.octets();
+            let ip = (octets[0] as u32) << 24
+                | (octets[1] as u32) << 16
+                | (octets[2] as u32) << 8
+                | octets[3] as u32;
+            if let Some((range_ip, mask)) = parse_ip_range(range_str) {
+                return (ip & mask) == range_ip;
+            }
+        }
+    }
+    false
+}
+
+pub fn is_known_good_ip(ip: &str) -> bool {
+    if GOOD_IPS.contains(ip) {
+        return true;
+    }
+    for good_ip in GOOD_IPS.iter() {
+        if good_ip.contains('/') && ip_in_range(ip, good_ip) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn is_public_routable_ip(ip: &str) -> bool {
     let addr = match ip.parse::<IpAddr>() {
         Ok(a) => a,
@@ -142,7 +174,6 @@ pub fn is_public_routable_ip(ip: &str) -> bool {
 
     match addr {
         IpAddr::V4(v4) => {
-            // Exclude private, loopback, link-local, broadcast, documentation, multicast, and unspecified
             !(v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
@@ -156,7 +187,6 @@ pub fn is_public_routable_ip(ip: &str) -> bool {
             let is_site_local = (segments[0] & 0xffc0) == 0xfec0;
             let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
 
-            // Exclude loopback, unspecified, unique-local, link-local, site-local, documentation, multicast
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_unique_local()

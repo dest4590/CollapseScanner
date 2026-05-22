@@ -9,10 +9,7 @@ mod types;
 mod utils;
 
 use {
-    crate::output::{
-        print_detailed_file_report, print_finding_statistics, print_severity_matrix,
-        print_top_risky_files,
-    },
+    crate::output::print_scan_report_structured,
     crate::scanner::scan::CollapseScanner,
     crate::types::{DetectionMode, FindingType, ScanResult, ScannerOptions},
     clap::Parser,
@@ -101,7 +98,7 @@ fn print_banner() {
     );
     println!(
         "{}",
-        "|                     Java artifact triage, without execution                   |"
+        "|                     Java scanner, without exceptions                         |"
             .bright_blue()
             .bold()
     );
@@ -326,42 +323,6 @@ fn collect_finding_stats(
     (total_findings, all_findings)
 }
 
-fn print_finding_breakdown(all_findings: &HashMap<FindingType, HashSet<String>>) {
-    println!("\n{}", "Finding breakdown".bright_white().bold());
-
-    let mut sorted_types: Vec<_> = all_findings.keys().collect();
-    sorted_types.sort_by_key(|ft| std::cmp::Reverse(ft.base_score()));
-
-    for finding_type in sorted_types {
-        let values = &all_findings[finding_type];
-        let (icon, color) = finding_type.with_symbol();
-        let severity = match finding_type.base_score() {
-            score if score >= 8 => "CRITICAL",
-            score if score >= 5 => "HIGH",
-            score if score >= 3 => "MEDIUM",
-            _ => "LOW",
-        };
-
-        println!(
-            "\n  {} {} [{}] ({})",
-            icon.color(color).bold(),
-            finding_type.to_string().color(color).bold(),
-            severity.color(color).bold(),
-            values.len().to_string().bright_white()
-        );
-
-        let mut sorted_values: Vec<&String> = values.iter().collect();
-        sorted_values.sort();
-
-        for (idx, value) in sorted_values.iter().take(10).enumerate() {
-            println!("      [{}] {}", idx + 1, value.bright_white());
-        }
-        if sorted_values.len() > 10 {
-            println!("      ... and {} more", sorted_values.len() - 10);
-        }
-    }
-}
-
 fn print_empty_scan_result(path: &Path, scanner: &CollapseScanner) {
     print_section_header("SCAN RESULTS");
 
@@ -397,7 +358,7 @@ fn print_text_report(
     let mut sorted_results = significant_results;
     sorted_results.sort_by_key(|r| &r.file_path);
 
-    let (total_findings, all_findings) = collect_finding_stats(&sorted_results);
+    let (total_findings, _all_findings) = collect_finding_stats(&sorted_results);
 
     print_section_header("SCAN SUMMARY");
 
@@ -434,11 +395,7 @@ fn print_text_report(
         scan_rate
     );
 
-    print_finding_breakdown(&all_findings);
-    print_severity_matrix(&sorted_results);
-    print_finding_statistics(&sorted_results);
-    print_top_risky_files(&sorted_results, 8);
-    print_detailed_file_report(&sorted_results);
+    print_scan_report_structured(&sorted_results);
 }
 
 fn handle_json_output(

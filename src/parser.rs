@@ -2,7 +2,6 @@ use crate::errors::ScanError;
 use crate::types::{ClassDetails, ConstantPoolEntry, FieldInfo, MethodCallInfo, MethodInfo};
 use byteorder::{BigEndian, ReadBytesExt};
 use colored::Colorize;
-use encoding_rs::UTF_8;
 use std::collections::{HashSet, VecDeque};
 use std::io::{Cursor, Seek, SeekFrom};
 
@@ -575,9 +574,9 @@ fn parse_constant_pool(
                 }
 
                 let utf8_bytes = &data[current_pos..end_pos];
-                let (cow, _encoding_used, _) = UTF_8.decode(utf8_bytes);
+                let decoded = String::from_utf8_lossy(utf8_bytes);
 
-                constant_pool.push(ConstantPoolEntry::Utf8(cow.into()));
+                constant_pool.push(ConstantPoolEntry::Utf8(decoded.into()));
                 cursor.seek(SeekFrom::Current(length as i64))?;
                 1
             }

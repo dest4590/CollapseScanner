@@ -25,7 +25,7 @@ The goal is triage. If a file is noisy, packed, or reaching out to strange infra
 You need Rust.
 
 ```bash
-git clone https://github.com/CollapseLoader/CollapseScanner.git
+git clone https://github.com/dest4590/CollapseScanner.git
 cd CollapseScanner
 cargo build --release
 ```
