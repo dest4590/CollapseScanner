@@ -8,7 +8,7 @@ use std::time::Instant;
 use zip::ZipArchive;
 
 use crate::config::SYSTEM_CONFIG;
-use crate::constants::{
+use crate::rules::{
     EXECUTABLE_RESOURCE_EXTENSIONS, NATIVE_LIBRARY_EXTENSIONS, NESTED_ARCHIVE_EXTENSIONS,
     SCRIPT_RESOURCE_EXTENSIONS,
 };

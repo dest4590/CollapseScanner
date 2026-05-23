@@ -1,9 +1,20 @@
+/// Java class file parser
+///
+/// This module parses Java bytecode (.class files) and extracts:
+/// - Class metadata (name, superclass, interfaces)
+/// - Methods and fields  
+/// - Constant pool
+/// - Method invocations
+/// - String literals
+///
 use crate::errors::ScanError;
 use crate::types::{ClassDetails, ConstantPoolEntry, FieldInfo, MethodCallInfo, MethodInfo};
 use byteorder::{BigEndian, ReadBytesExt};
 use colored::Colorize;
 use std::collections::{HashSet, VecDeque};
 use std::io::{Cursor, Seek, SeekFrom};
+
+pub struct ClassParser;
 
 #[inline]
 fn check_bounds(
@@ -724,145 +735,148 @@ fn skip_attributes(
     Ok(())
 }
 
-pub fn parse_class_structure(
-    data: &[u8],
-    original_path_str: &str,
-    verbose: bool,
-) -> Result<ClassDetails, ScanError> {
-    let mut cursor = Cursor::new(data);
+impl ClassParser {
+    /// Parse a Java class file from raw bytecode
+    pub fn parse(
+        data: &[u8],
+        original_path_str: &str,
+        verbose: bool,
+    ) -> Result<ClassDetails, ScanError> {
+        let mut cursor = Cursor::new(data);
 
-    if data.len() < 10 {
-        return Err(ScanError::ClassParseError {
-            path: original_path_str.to_string(),
-            msg: "File too small for valid class header".to_string(),
-        });
-    }
+        if data.len() < 10 {
+            return Err(ScanError::ClassParseError {
+                path: original_path_str.to_string(),
+                msg: "File too small for valid class header".to_string(),
+            });
+        }
 
-    let magic = cursor.read_u32::<BigEndian>()?;
-    if magic != 0xCAFEBABE {
-        return Err(ScanError::ClassParseError {
-            path: original_path_str.to_string(),
-            msg: format!(
-                "Invalid magic number: Expected 0xCAFEBABE, found {:#X}",
-                magic
-            ),
-        });
-    }
-    let _minor_version = cursor.read_u16::<BigEndian>()?;
-    let _major_version = cursor.read_u16::<BigEndian>()?;
-    let cp_count = cursor.read_u16::<BigEndian>()?;
-    if cp_count == 0 {
-        return Err(ScanError::ClassParseError {
-            path: original_path_str.to_string(),
-            msg: "Invalid constant pool count: 0".to_string(),
-        });
-    }
+        let magic = cursor.read_u32::<BigEndian>()?;
+        if magic != 0xCAFEBABE {
+            return Err(ScanError::ClassParseError {
+                path: original_path_str.to_string(),
+                msg: format!(
+                    "Invalid magic number: Expected 0xCAFEBABE, found {:#X}",
+                    magic
+                ),
+            });
+        }
+        let _minor_version = cursor.read_u16::<BigEndian>()?;
+        let _major_version = cursor.read_u16::<BigEndian>()?;
+        let cp_count = cursor.read_u16::<BigEndian>()?;
+        if cp_count == 0 {
+            return Err(ScanError::ClassParseError {
+                path: original_path_str.to_string(),
+                msg: "Invalid constant pool count: 0".to_string(),
+            });
+        }
 
-    let constant_pool = parse_constant_pool(&mut cursor, cp_count, original_path_str)?;
+        let constant_pool = parse_constant_pool(&mut cursor, cp_count, original_path_str)?;
 
-    check_bounds(
-        &cursor,
-        6,
-        original_path_str,
-        "access_flags, this_class, super_class",
-    )?;
-    let access_flags = cursor.read_u16::<BigEndian>()?;
-    let this_class_index = cursor.read_u16::<BigEndian>()?;
-    let super_class_index = cursor.read_u16::<BigEndian>()?;
-
-    let class_name = resolve_class_name(
-        &constant_pool,
-        this_class_index,
-        original_path_str,
-        "this_class",
-    )?;
-    let superclass_name = resolve_class_name(
-        &constant_pool,
-        super_class_index,
-        original_path_str,
-        "super_class",
-    )?;
-
-    check_bounds(&cursor, 2, original_path_str, "interfaces_count")?;
-    let interfaces_count = cursor.read_u16::<BigEndian>()?;
-    let mut interfaces = Vec::with_capacity(interfaces_count as usize);
-    for i in 0..interfaces_count {
         check_bounds(
             &cursor,
-            2,
+            6,
             original_path_str,
-            &format!("interface index {}", i),
+            "access_flags, this_class, super_class",
         )?;
-        let interface_index = cursor.read_u16::<BigEndian>()?;
+        let access_flags = cursor.read_u16::<BigEndian>()?;
+        let this_class_index = cursor.read_u16::<BigEndian>()?;
+        let super_class_index = cursor.read_u16::<BigEndian>()?;
 
-        interfaces.push(resolve_class_name(
+        let class_name = resolve_class_name(
             &constant_pool,
-            interface_index,
+            this_class_index,
             original_path_str,
-            &format!("interface {}", i),
-        )?);
-    }
+            "this_class",
+        )?;
+        let superclass_name = resolve_class_name(
+            &constant_pool,
+            super_class_index,
+            original_path_str,
+            "super_class",
+        )?;
 
-    check_bounds(&cursor, 2, original_path_str, "fields_count")?;
-    let fields_count = cursor.read_u16::<BigEndian>()?;
-    let fields = parse_members(
-        &mut cursor,
-        fields_count,
-        original_path_str,
-        verbose,
-        "field",
-        &constant_pool,
-        |name, descriptor, access_flags| FieldInfo {
-            name,
-            descriptor,
-            access_flags,
-        },
-    )?;
+        check_bounds(&cursor, 2, original_path_str, "interfaces_count")?;
+        let interfaces_count = cursor.read_u16::<BigEndian>()?;
+        let mut interfaces = Vec::with_capacity(interfaces_count as usize);
+        for i in 0..interfaces_count {
+            check_bounds(
+                &cursor,
+                2,
+                original_path_str,
+                &format!("interface index {}", i),
+            )?;
+            let interface_index = cursor.read_u16::<BigEndian>()?;
 
-    check_bounds(&cursor, 2, original_path_str, "methods_count")?;
-    let methods_count = cursor.read_u16::<BigEndian>()?;
-    let (methods, method_calls) = parse_methods(
-        &mut cursor,
-        methods_count,
-        original_path_str,
-        verbose,
-        &constant_pool,
-    )?;
+            interfaces.push(resolve_class_name(
+                &constant_pool,
+                interface_index,
+                original_path_str,
+                &format!("interface {}", i),
+            )?);
+        }
 
-    let mut string_set: HashSet<String> = constant_pool
-        .iter()
-        .filter_map(|entry| match entry {
-            ConstantPoolEntry::Utf8(s) => Some(s.to_string()),
+        check_bounds(&cursor, 2, original_path_str, "fields_count")?;
+        let fields_count = cursor.read_u16::<BigEndian>()?;
+        let fields = parse_members(
+            &mut cursor,
+            fields_count,
+            original_path_str,
+            verbose,
+            "field",
+            &constant_pool,
+            |name, descriptor, access_flags| FieldInfo {
+                name,
+                descriptor,
+                access_flags,
+            },
+        )?;
+
+        check_bounds(&cursor, 2, original_path_str, "methods_count")?;
+        let methods_count = cursor.read_u16::<BigEndian>()?;
+        let (methods, method_calls) = parse_methods(
+            &mut cursor,
+            methods_count,
+            original_path_str,
+            verbose,
+            &constant_pool,
+        )?;
+
+        let mut string_set: HashSet<String> = constant_pool
+            .iter()
+            .filter_map(|entry| match entry {
+                ConstantPoolEntry::Utf8(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        for utf8_index in constant_pool.iter().filter_map(|entry| match entry {
+            ConstantPoolEntry::String(index) => Some(*index),
             _ => None,
-        })
-        .collect();
-
-    for utf8_index in constant_pool.iter().filter_map(|entry| match entry {
-        ConstantPoolEntry::String(index) => Some(*index),
-        _ => None,
-    }) {
-        match resolve_utf8(&constant_pool, utf8_index, original_path_str) {
-            Ok(s) => {
-                string_set.insert(s.to_string());
-            }
-            Err(e) => {
-                if verbose {
-                    eprintln!("(!) String constant data resolution error: {}", e);
+        }) {
+            match resolve_utf8(&constant_pool, utf8_index, original_path_str) {
+                Ok(s) => {
+                    string_set.insert(s.to_string());
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!("(!) String constant data resolution error: {}", e);
+                    }
                 }
             }
         }
-    }
-    let mut strings: Vec<String> = string_set.into_iter().collect();
-    strings.sort_unstable();
+        let mut strings: Vec<String> = string_set.into_iter().collect();
+        strings.sort_unstable();
 
-    Ok(ClassDetails {
-        class_name,
-        superclass_name,
-        interfaces,
-        methods,
-        method_calls,
-        fields,
-        strings,
-        access_flags,
-    })
+        Ok(ClassDetails {
+            class_name,
+            superclass_name,
+            interfaces,
+            methods,
+            method_calls,
+            fields,
+            strings,
+            access_flags,
+        })
+    }
 }

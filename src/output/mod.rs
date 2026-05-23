@@ -1,13 +1,157 @@
+//! Output formatting and reporting module
+//!
+//! Provides functions for formatting and displaying scan results in text and JSON formats.
+
 use crate::{
-    calculate_scan_score, collect_finding_stats, format_scan_stats,
+    calculate_scan_score,
     types::{FindingType, ScanResult},
 };
 use colored::Colorize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+pub fn collect_finding_stats(
+    results: &[&ScanResult],
+) -> (usize, HashMap<FindingType, HashSet<String>>) {
+    let mut total_findings = 0;
+    let mut all_findings: HashMap<FindingType, HashSet<String>> = HashMap::new();
+
+    for result in results {
+        for (finding_type, value) in result.matches.iter() {
+            total_findings += 1;
+            all_findings
+                .entry(*finding_type)
+                .or_default()
+                .insert(value.clone());
+        }
+    }
+
+    (total_findings, all_findings)
+}
+
+pub fn format_scan_stats(duration: Duration, total_files: usize) -> (f64, f64) {
+    let scan_time = duration.as_secs_f64();
+    let scan_rate = if scan_time > 0.0 {
+        total_files as f64 / scan_time
+    } else {
+        0.0
+    };
+    (scan_time, scan_rate)
+}
 
 pub fn print_section_header(title: &str) {
     println!("\n{}", title.bright_cyan().bold());
     println!("{}", "─".repeat(70).bright_black());
+}
+
+pub fn print_banner() {
+    const BANNER_BOX: &str =
+        "+------------------------------------------------------------------------------+";
+    const BANNER_BOTTOM: &str =
+        "+------------------------------------------------------------------------------+";
+
+    println!("\n{}", BANNER_BOX.bright_blue().bold());
+    println!(
+        "{}",
+        format!(
+            "|{:>28}CollapseScanner v{}{:>30}|",
+            "",
+            env!("CARGO_PKG_VERSION"),
+            ""
+        )
+        .bright_blue()
+        .bold()
+    );
+    println!(
+        "{}",
+        "|                     Java scanner, without exceptions                         |"
+            .bright_blue()
+            .bold()
+    );
+    println!("{}", BANNER_BOTTOM.bright_blue().bold());
+}
+
+pub fn print_scan_config(
+    path: &Path,
+    mode_label: String,
+    mode_description: &str,
+    config_path: &Option<std::path::PathBuf>,
+    exclude_patterns: &[String],
+    find_patterns: &[String],
+    ignore_keywords_file: &Option<std::path::PathBuf>,
+    verbose: bool,
+) {
+    println!("\n{}", "Scan setup".bright_white().bold());
+    println!("  Target : {}", path.display().to_string().bright_white());
+    println!(
+        "  Mode   : {} ({})",
+        mode_label.bright_white(),
+        mode_description.dimmed()
+    );
+
+    if let Some(config_path) = config_path {
+        println!("  Config : {}", config_path.display().to_string().dimmed());
+    }
+
+    if !exclude_patterns.is_empty() {
+        println!("  Exclude:");
+        for pattern in exclude_patterns {
+            println!("    - {}", pattern.dimmed());
+        }
+    }
+
+    if !find_patterns.is_empty() {
+        println!("  Match only:");
+        for pattern in find_patterns {
+            println!("    - {}", pattern.dimmed());
+        }
+    }
+
+    if let Some(p) = ignore_keywords_file {
+        println!("  Ignore : {}", p.display().to_string().dimmed());
+    }
+
+    if verbose {
+        println!("  Verbose: {}", "enabled".bright_white());
+    }
+}
+
+pub fn print_empty_scan_result(path: &Path, exclude_patterns: &[String], find_patterns: &[String]) {
+    const BANNER_BOX: &str =
+        "+------------------------------------------------------------------------------+";
+    const BANNER_BOTTOM: &str =
+        "+------------------------------------------------------------------------------+";
+
+    println!("\n{}", BANNER_BOX.bright_blue().bold());
+    println!(
+        "{}",
+        format!("| {:<76} |", "SCAN RESULTS").bright_blue().bold()
+    );
+    println!("{}", BANNER_BOTTOM.bright_blue().bold());
+
+    if !crate::utils::path_contains_scannable_files(path) {
+        println!(
+            "\n[-] {}",
+            "No .jar or .class files were found in the target path.".yellow()
+        );
+    } else if !exclude_patterns.is_empty() || !find_patterns.is_empty() {
+        println!(
+            "\n[+] {}",
+            "No findings in files that matched your filters.".green()
+        );
+    } else {
+        println!("\n[+] {}", "No findings for the selected mode.".green());
+    }
+}
+
+pub fn write_json_report(
+    output_path: &str,
+    report: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(output_path, serde_json::to_string_pretty(report)?)?;
+    Ok(())
 }
 
 pub fn print_general_info(sorted_results: &[&ScanResult], elapsed: std::time::Duration) {

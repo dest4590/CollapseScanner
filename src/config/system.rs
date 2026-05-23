@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 use std::env;
 
 const DEFAULT_RESULT_CACHE_SIZE: usize = 4096;
@@ -9,6 +8,7 @@ const LOW_MEMORY_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
 const MEDIUM_MEMORY_THRESHOLD: u64 = 8 * 1024 * 1024 * 1024;
 const HIGH_MEMORY_THRESHOLD: u64 = 16 * 1024 * 1024 * 1024;
 
+#[derive(Debug, Clone)]
 pub struct SystemConfig {
     pub result_cache_size: usize,
     pub buffer_size: usize,
@@ -96,4 +96,8 @@ impl SystemConfig {
     }
 }
 
-pub static SYSTEM_CONFIG: Lazy<SystemConfig> = Lazy::new(SystemConfig::new);
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}

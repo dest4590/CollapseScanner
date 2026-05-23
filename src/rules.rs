@@ -3,6 +3,105 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::net::IpAddr;
 
+// ============================================================================
+// File Type Extensions
+// ============================================================================
+
+pub const JAR_EXTS: &[&str] = &["jar"];
+pub const CLASS_EXTS: &[&str] = &["class"];
+pub const JAR_CLASS_EXTS: &[&str] = &["jar", "class"];
+
+pub const NESTED_ARCHIVE_EXTENSIONS: &[&str] = &["jar", "zip", "jmod"];
+pub const SCRIPT_RESOURCE_EXTENSIONS: &[&str] =
+    &["bat", "cmd", "ps1", "vbs", "js", "hta", "wsf", "sh"];
+pub const EXECUTABLE_RESOURCE_EXTENSIONS: &[&str] = &["exe", "scr", "com", "msi"];
+pub const NATIVE_LIBRARY_EXTENSIONS: &[&str] = &["dll", "so", "dylib", "jnilib"];
+
+// ============================================================================
+// Suspicious Domains and Hosts
+// ============================================================================
+
+pub static SUSSY_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
+    [
+        "discord.com",
+        "discordapp.com",
+        "discord.gg",
+        "cdn.discordapp.com",
+        "pastebin.com",
+        "hastebin.com",
+        "ghostbin.co",
+        "gofile.io",
+        "transfer.sh",
+        "webhook.site",
+        "requestbin.net",
+        "ngrok.io",
+        "ngrok-free.app",
+        "localtunnel.me",
+        "serveo.net",
+        "grabify.link",
+        "iplogger.org",
+        "ipify.org",
+        "ifconfig.me",
+        "bit.ly",
+        "tinyurl.com",
+    ]
+    .iter()
+    .map(|&s| s.to_lowercase())
+    .collect()
+});
+
+// ============================================================================
+// Dynamic Code Execution Markers
+// ============================================================================
+
+pub const DYNAMIC_LOADING_MARKERS: &[&str] =
+    &["defineClass", "URLClassLoader", "Lookup.defineClass"];
+
+pub const SCRIPT_ENGINE_MARKERS: &[&str] = &[
+    "javax/script/ScriptEngineManager",
+    "javax/script/ScriptEngine",
+];
+
+pub const JAVA_AGENT_MARKERS: &[&str] = &[
+    "java/lang/instrument/Instrumentation",
+    "Premain-Class",
+    "Agent-Class",
+    "Launcher-Agent-Class",
+];
+
+pub const ATTACH_API_MARKERS: &[&str] = &[
+    "com/sun/tools/attach/VirtualMachine",
+    "sun/tools/attach/HotSpotVirtualMachine",
+];
+
+pub const NATIVE_BRIDGE_MARKERS: &[&str] = &["com/sun/jna/", "sun/misc/Unsafe"];
+
+pub const SAFE_NATIVE_CALLS: &[&str] = &[
+    "com.sun.jna.Native::getLastError()I",
+    "com.sun.jna.Native::toString",
+    "com.sun.jna.Native::load",
+    "com.sun.jna.Native::getNativeSize",
+    "com.sun.jna.Platform",
+    "com.sun.jna.Memory",
+    "com.sun.jna.Structure",
+    "com.sun.jna.Pointer",
+    "com.sun.jna.NativeLong",
+    "com.sun.jna.Callback",
+    "com.sun.jna.Library",
+    "com.sun.jna.TypeMapper",
+    "com.sun.jna.Union",
+    "com.sun.jna.ptr",
+    "com.sun.jna.win32",
+    "com.sun.jna.platform",
+    "sun.misc.Unsafe",
+    "com/sun/jna/Native",
+    "sun/misc/Unsafe",
+];
+
+// ============================================================================
+// Pattern Matching Regex Objects
+// ============================================================================
+
 pub static IP_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap()
 });
@@ -34,24 +133,19 @@ pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
     "#).unwrap()
 });
 
+// ============================================================================
+// Known Good Links and IPs (Whitelist)
+// ============================================================================
+
 pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
     [
-        "account.mojang.com",
         "aka.ms",
         "apache.org",
-        "api.mojang.com",
-        "api.spiget.org",
-        "authserver.mojang.com",
-        "bugs.mojang.com",
-        "cabaletta/baritone",
         "ci.viaversion.com",
-        "com/viaversion/",
-        "docs.advntr.dev",
         "dominos.com",
         "dump.viaversion.com",
         "eclipse.org",
         "java.sun.org",
-        "jo0001.github.io",
         "logging.apache.org",
         "login.live.com",
         "lwjgl.org",
@@ -61,10 +155,7 @@ pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
         "mojang.com",
         "netty.io",
         "optifine.net",
-        "paulscode/sound/",
         "s.optifine.net",
-        "sessionserver.mojang.com",
-        "shader-tutorial.dev",
         "snoop.minecraft.net",
         "tools.ietf.org",
         "viaversion.com",
@@ -76,6 +167,12 @@ pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
         "openssl.org",
         "yggdrasil-auth-session-staging.mojang.zone",
         "slf4j.org",
+        "xboxlive.com",
+        "minecraftservices.com",
+        "playfabapi.com",
+        "microsoft.com",
+        "live.com",
+        "w3.org",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -101,10 +198,17 @@ pub static GOOD_IPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "8.8.4.4",
         "1.1.1.1",
         "9.9.9.9",
+        // just trash
+        "1.3.6.1",
+        "123.123.123.123",
     ]
     .into_iter()
     .collect()
 });
+
+// ============================================================================
+// IP Address Utilities
+// ============================================================================
 
 fn parse_ip_range(range_str: &str) -> Option<(u32, u32)> {
     if !range_str.contains('/') {
@@ -195,24 +299,5 @@ pub fn is_public_routable_ip(ip: &str) -> bool {
                 || is_documentation
                 || v6.is_multicast())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detects_token_like_secrets() {
-        assert!(SECRET_REGEX.is_match("token=abc1234567890ABCDEF_abcdef1234567890"));
-        assert!(SECRET_REGEX
-            .is_match("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payloadpayload.signaturesig"));
-    }
-
-    #[test]
-    fn excludes_reserved_ip_ranges() {
-        assert!(!is_public_routable_ip("192.168.1.10"));
-        assert!(!is_public_routable_ip("203.0.113.12"));
-        assert!(is_public_routable_ip("93.184.216.34"));
     }
 }

@@ -4,13 +4,13 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::detection::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
+use crate::cache::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
 use crate::errors::ScanError;
-use crate::filters::{
+use crate::rules::{
     is_known_good_ip, is_public_routable_ip, IPV6_REGEX, IP_REGEX, MALICIOUS_PATTERN_REGEX,
     SECRET_REGEX, URL_REGEX,
 };
-use crate::parser::parse_class_structure;
+use crate::parsers::ClassParser;
 use crate::scanner::api_analyzer::ApiAnalyzer;
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{ClassDetails, DetectionMode, FindingType, ResourceInfo, ScanResult};
@@ -90,7 +90,7 @@ impl CollapseScanner {
             );
         }
 
-        let class_details = parse_class_structure(data, original_path_str, self.options.verbose)?;
+        let class_details = ClassParser::parse(data, original_path_str, self.options.verbose)?;
 
         self.analyze_class_details(&class_details, &mut findings);
 

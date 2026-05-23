@@ -1,4 +1,4 @@
-use crate::constants::{
+use crate::rules::{
     ATTACH_API_MARKERS, DYNAMIC_LOADING_MARKERS, JAVA_AGENT_MARKERS, NATIVE_BRIDGE_MARKERS,
     SAFE_NATIVE_CALLS, SCRIPT_ENGINE_MARKERS,
 };
@@ -32,29 +32,6 @@ impl ApiAnalyzer {
             findings.push((
                 FindingType::SuspiciousApi,
                 format!("Process execution API usage: {}", call_summary),
-            ));
-        }
-
-        let native_methods: Vec<String> = details
-            .methods
-            .iter()
-            .filter(|method| method.access_flags & 0x0100 != 0)
-            .map(|method| method.name.clone())
-            .collect();
-
-        if !native_methods.is_empty() {
-            let method_summary = if native_methods.len() == 1 {
-                native_methods[0].clone()
-            } else {
-                format!(
-                    "{} (and {} more)",
-                    native_methods[0],
-                    native_methods.len() - 1
-                )
-            };
-            findings.push((
-                FindingType::SuspiciousApi,
-                format!("Native method declaration: {}", method_summary),
             ));
         }
 
