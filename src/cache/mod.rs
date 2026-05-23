@@ -1,8 +1,8 @@
 use once_cell::sync::Lazy;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+
 
 pub static SAFE_STRING_CACHE: Lazy<Arc<RwLock<HashSet<String>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
@@ -20,6 +20,7 @@ pub fn cache_safe_string(s: &str) {
         cache.insert(s.to_string());
     }
 }
+
 
 pub fn calculate_detection_hash(data: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();

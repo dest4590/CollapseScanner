@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::config::SYSTEM_CONFIG;
-use crate::constants::SUSSY_DOMAINS;
+use crate::rules::{SUSSY_DOMAINS, GOOD_LINKS};
 use crate::errors::ScanError;
-use crate::filters::GOOD_LINKS;
 use crate::types::ScannerOptions;
 
 type ResultCache = Arc<RwLock<HashMap<u64, Arc<Vec<(crate::types::FindingType, String)>>>>>;

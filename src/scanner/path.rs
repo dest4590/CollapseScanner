@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::config::SYSTEM_CONFIG;
-use crate::constants::{CLASS_EXTS, JAR_CLASS_EXTS, JAR_EXTS};
+use crate::rules::{CLASS_EXTS, JAR_CLASS_EXTS, JAR_EXTS};
 use crate::errors::ScanError;
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{ProgressScope, ScanResult};
