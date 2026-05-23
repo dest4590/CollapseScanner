@@ -1,5 +1,5 @@
-use std::env;
 use once_cell::sync::Lazy;
+use std::env;
 
 const DEFAULT_RESULT_CACHE_SIZE: usize = 4096;
 const DEFAULT_BUFFER_SIZE: usize = 512 * 1024;
@@ -87,6 +87,12 @@ impl SystemConfig {
             self.safe_string_cache_capacity
         );
         println!("   [f] Max File Size: {} MB", self.max_file_size);
+
+        println!("   [i] You can override these settings with environment variables:");
+        println!("       COLLAPSE_RESULT_CACHE_SIZE (usize)");
+        println!("       COLLAPSE_BUFFER_SIZE_MB (usize)");
+        println!("       COLLAPSE_STRING_CACHE_CAPACITY (usize)");
+        println!("       COLLAPSE_AVAILABLE_MEMORY_MB (u64)");
     }
 }
 

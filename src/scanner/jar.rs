@@ -8,18 +8,18 @@ use std::time::Instant;
 use zip::ZipArchive;
 
 use crate::config::SYSTEM_CONFIG;
+use crate::constants::{
+    EXECUTABLE_RESOURCE_EXTENSIONS, NATIVE_LIBRARY_EXTENSIONS, NESTED_ARCHIVE_EXTENSIONS,
+    SCRIPT_RESOURCE_EXTENSIONS,
+};
 use crate::errors::ScanError;
 use crate::scanner::scan::CollapseScanner;
-use crate::types::{FindingType, ResourceInfo, ScanResult};
+use crate::types::{FindingType, ProgressScope, ResourceInfo, ScanResult};
 
 const MAX_NESTED_ARCHIVE_DEPTH: usize = 2;
 const HIGHLY_COMPRESSED_SIZE_THRESHOLD: u64 = 256 * 1024;
 const HIGH_COMPRESSION_RATIO_THRESHOLD: f64 = 40.0;
-
-const NESTED_ARCHIVE_EXTENSIONS: &[&str] = &["jar", "zip", "jmod"];
-const SCRIPT_RESOURCE_EXTENSIONS: &[&str] = &["bat", "cmd", "ps1", "vbs", "js", "hta", "wsf", "sh"];
-const EXECUTABLE_RESOURCE_EXTENSIONS: &[&str] = &["exe", "scr", "com", "msi"];
-const NATIVE_LIBRARY_EXTENSIONS: &[&str] = &["dll", "so", "dylib", "jnilib"];
+const JAR_ENTRY_BATCH_SIZE: usize = 24;
 
 impl CollapseScanner {
     fn get_archive_entry_name(entry_name: &str) -> String {
@@ -42,15 +42,20 @@ impl CollapseScanner {
         let processed_count = Arc::new(AtomicUsize::new(0));
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
-                gp.total = total_files;
-                gp.current = 0;
-                gp.message = "Processing JAR entries...".to_string();
+                if gp.scope != ProgressScope::Targets {
+                    gp.scope = ProgressScope::JarEntries;
+                    gp.total = total_files;
+                    gp.current = 0;
+                }
+                gp.message = format!("Scanning {}", jar_path.display());
             }
         }
 
         let results_arc = Arc::new(Mutex::new(Vec::with_capacity(total_files)));
 
         rayon::scope(|scope| {
+            let mut pending_entries = Vec::with_capacity(JAR_ENTRY_BATCH_SIZE);
+
             for i in 0..total_files {
                 let mut archive_file = match archive.by_index(i) {
                     Ok(f) => f,
@@ -104,19 +109,58 @@ impl CollapseScanner {
                 }
 
                 let compressed_size = archive_file.compressed_size();
-                let arc_buf = Arc::new(buffer);
-                let name_clone = original_entry_name;
+                pending_entries.push((original_entry_name, compressed_size, buffer));
+
+                if pending_entries.len() >= JAR_ENTRY_BATCH_SIZE {
+                    let entries = std::mem::replace(
+                        &mut pending_entries,
+                        Vec::with_capacity(JAR_ENTRY_BATCH_SIZE),
+                    );
+                    let processed_count_clone = processed_count.clone();
+                    let results_clone = results_arc.clone();
+
+                    scope.spawn(move |_| {
+                        let mut batch_results = Vec::new();
+
+                        for (entry_name, compressed_size, buffer) in entries {
+                            if let Ok(mut entry_results) = self.process_jar_entry(
+                                &entry_name,
+                                &buffer,
+                                compressed_size,
+                                &processed_count_clone,
+                            ) {
+                                batch_results.append(&mut entry_results);
+                            }
+                        }
+
+                        if !batch_results.is_empty() {
+                            results_clone.lock().unwrap().append(&mut batch_results);
+                        }
+                    });
+                }
+            }
+
+            if !pending_entries.is_empty() {
+                let entries = pending_entries;
                 let processed_count_clone = processed_count.clone();
                 let results_clone = results_arc.clone();
 
                 scope.spawn(move |_| {
-                    if let Ok(mut entry_results) = self.process_jar_entry(
-                        &name_clone,
-                        arc_buf.as_ref(),
-                        compressed_size,
-                        &processed_count_clone,
-                    ) {
-                        results_clone.lock().unwrap().append(&mut entry_results);
+                    let mut batch_results = Vec::new();
+
+                    for (entry_name, compressed_size, buffer) in entries {
+                        if let Ok(mut entry_results) = self.process_jar_entry(
+                            &entry_name,
+                            &buffer,
+                            compressed_size,
+                            &processed_count_clone,
+                        ) {
+                            batch_results.append(&mut entry_results);
+                        }
+                    }
+
+                    if !batch_results.is_empty() {
+                        results_clone.lock().unwrap().append(&mut batch_results);
                     }
                 });
             }
@@ -138,21 +182,15 @@ impl CollapseScanner {
 
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
-                gp.current = gp.total;
-                gp.message = format!(
-                    "Finished processing {} files",
-                    processed_count.load(Ordering::Relaxed)
-                );
+                if gp.scope == ProgressScope::JarEntries {
+                    gp.current = gp.total;
+                    gp.message = format!(
+                        "Finished processing {} entries",
+                        processed_count.load(Ordering::Relaxed)
+                    );
+                }
             }
         }
-
-        if self.options.verbose {
-            println!(
-                "[+] JAR scan completed in {:.2}s",
-                start_time.elapsed().as_secs_f64()
-            );
-        }
-
         Ok(results)
     }
 
@@ -163,7 +201,6 @@ impl CollapseScanner {
         compressed_size: u64,
         processed_count: &Arc<AtomicUsize>,
     ) -> Result<Vec<ScanResult>, ScanError> {
-
         let scan_results = self.scan_archive_entry_contents(
             original_entry_name,
             original_entry_name,
@@ -179,8 +216,10 @@ impl CollapseScanner {
                     gp.message = "Scan cancelled".to_string();
                     return Ok(Vec::new());
                 }
-                gp.current = count;
-                gp.message = original_entry_name.to_string();
+                if gp.scope == ProgressScope::JarEntries {
+                    gp.current = count;
+                    gp.message = original_entry_name.to_string();
+                }
             }
         }
 
@@ -336,7 +375,8 @@ impl CollapseScanner {
         let ends_with_ignore_case = |s: &str, suffix: &str| {
             s.len() >= suffix.len() && a_ends_with_b_case_insensitive(s, suffix)
         };
-        let is_class_candidate = ends_with_ignore_case(entry_name, ".class") || ends_with_ignore_case(entry_name, ".class/");
+        let is_class_candidate = ends_with_ignore_case(entry_name, ".class")
+            || ends_with_ignore_case(entry_name, ".class/");
         let is_interesting_resource = is_class_candidate
             || self.has_extension(entry_name, NESTED_ARCHIVE_EXTENSIONS)
             || self.has_extension(entry_name, SCRIPT_RESOURCE_EXTENSIONS)

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::config::SYSTEM_CONFIG;
-use crate::detection::SUSSY_DOMAINS;
+use crate::constants::SUSSY_DOMAINS;
 use crate::errors::ScanError;
 use crate::filters::GOOD_LINKS;
 use crate::types::ScannerOptions;

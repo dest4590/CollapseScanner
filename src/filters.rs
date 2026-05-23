@@ -15,7 +15,7 @@ pub static URL_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub static MALICIOUS_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(powershell|cmd(?:\.exe)?|/bin/(?:ba)?sh|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|loadLibrary|System\.load|defineClass|setAccessible|VirtualMachine\.attach|keylogger|clipboard|appdata|\.minecraft|webhook|invoke|reflection|forName|getMethod|getDeclaredMethod|setAccessible|readFile|writeFile|decrypt|encrypt)\b").unwrap()
+    Regex::new(r"(?i)\b(powershell|cmd(?:\.exe)?|/bin/(?:ba)?sh|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|loadLibrary|System\.load|defineClass|VirtualMachine\.attach|keylogger|clipboard|appdata|\\.minecraft|webhook|readFile|writeFile|decrypt|encrypt)\b").unwrap()
 });
 
 pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {

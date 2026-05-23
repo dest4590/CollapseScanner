@@ -1,40 +1,11 @@
+use once_cell::sync::Lazy;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
-use once_cell::sync::Lazy;
 
 pub static SAFE_STRING_CACHE: Lazy<Arc<RwLock<HashSet<String>>>> =
     Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
-
-pub static SUSSY_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
-    [
-        "discord.com",
-        "discordapp.com",
-        "discord.gg",
-        "cdn.discordapp.com",
-        "pastebin.com",
-        "hastebin.com",
-        "ghostbin.co",
-        "gofile.io",
-        "transfer.sh",
-        "webhook.site",
-        "requestbin.net",
-        "ngrok.io",
-        "ngrok-free.app",
-        "localtunnel.me",
-        "serveo.net",
-        "grabify.link",
-        "iplogger.org",
-        "ipify.org",
-        "ifconfig.me",
-        "bit.ly",
-        "tinyurl.com",
-    ]
-    .iter()
-    .map(|&s| s.to_lowercase())
-    .collect()
-});
 
 pub fn is_cached_safe_string(s: &str) -> bool {
     if let Ok(cache) = SAFE_STRING_CACHE.read() {

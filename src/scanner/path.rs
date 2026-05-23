@@ -7,9 +7,10 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::config::SYSTEM_CONFIG;
+use crate::constants::{CLASS_EXTS, JAR_CLASS_EXTS, JAR_EXTS};
 use crate::errors::ScanError;
 use crate::scanner::scan::CollapseScanner;
-use crate::types::ScanResult;
+use crate::types::{ProgressScope, ScanResult};
 
 fn has_extension(path: &Path, exts: &[&str]) -> bool {
     path.extension()
@@ -26,13 +27,11 @@ fn glob_matches(path: &str, pattern: &str) -> bool {
         return path.ends_with(&pattern[1..]);
     }
 
-    if pattern.ends_with("/*") {
-        let dir = &pattern[..pattern.len() - 2];
+    if let Some(dir) = pattern.strip_suffix("/*") {
         return path.starts_with(dir) && path[dir.len()..].starts_with('/');
     }
 
-    if pattern.ends_with("/**") {
-        let dir = &pattern[..pattern.len() - 3];
+    if let Some(dir) = pattern.strip_suffix("/**") {
         return path.starts_with(dir);
     }
 
@@ -104,9 +103,19 @@ impl CollapseScanner {
             }
         }
 
-        if has_extension(path, &["jar"]) {
+        if has_extension(path, JAR_EXTS) {
+            if let Some(progress) = &self.options.progress {
+                if let Ok(mut state) = progress.lock() {
+                    if state.scope != ProgressScope::Targets {
+                        state.scope = ProgressScope::JarEntries;
+                        state.current = 0;
+                        state.total = 0;
+                        state.message = format!("Opening {}", path.display());
+                    }
+                }
+            }
             self.scan_jar_file(path)
-        } else if has_extension(path, &["class"]) {
+        } else if has_extension(path, CLASS_EXTS) {
             let filename = path.file_name().unwrap_or_default().to_string_lossy();
             if !self.should_scan(&filename) {
                 if self.options.verbose {
@@ -118,10 +127,32 @@ impl CollapseScanner {
             if self.options.verbose {
                 println!("[*] Scanning loose class file: {}", path.display());
             }
+
+            if let Some(progress) = &self.options.progress {
+                if let Ok(mut state) = progress.lock() {
+                    if state.scope != ProgressScope::Targets {
+                        state.scope = ProgressScope::Targets;
+                        state.total = 1;
+                        state.current = 0;
+                    }
+                    state.message = filename.to_string();
+                }
+            }
+
             let file_data = fs::read(path)?;
             let resource_info = self.analyze_resource(&filename, &file_data)?;
-            self.scan_class_file_data(&filename, file_data, Some(resource_info))
-                .map(|res| vec![res])
+            let result = self
+                .scan_class_file_data(&filename, file_data, Some(resource_info))
+                .map(|res| vec![res]);
+
+            if let Some(progress) = &self.options.progress {
+                if let Ok(mut state) = progress.lock() {
+                    state.current = state.total.max(1);
+                    state.message = filename.to_string();
+                }
+            }
+
+            result
         } else {
             Err(ScanError::UnsupportedFileType(
                 path.extension().map(|s| s.to_os_string()),
@@ -148,7 +179,7 @@ impl CollapseScanner {
             }
 
             let path = entry.path();
-            if !has_extension(path, &["jar", "class"]) {
+            if !has_extension(path, JAR_CLASS_EXTS) {
                 continue;
             }
 
@@ -166,13 +197,36 @@ impl CollapseScanner {
             );
         }
 
+        if let Some(progress) = &self.options.progress {
+            if let Ok(mut state) = progress.lock() {
+                state.scope = ProgressScope::Targets;
+                state.total = targets.len();
+                state.current = 0;
+                state.message = format!("Scanning {}", directory.display());
+            }
+        }
+
         let nested_results: Vec<Vec<ScanResult>> = targets
             .par_iter()
             .filter_map(|target| match self.scan_path(target) {
-                Ok(results) => Some(results),
+                Ok(results) => {
+                    if let Some(progress) = &self.options.progress {
+                        if let Ok(mut state) = progress.lock() {
+                            state.current += 1;
+                            state.message = target.display().to_string();
+                        }
+                    }
+                    Some(results)
+                }
                 Err(error) => {
                     if self.options.verbose {
                         eprintln!("(!) Error scanning {}: {}", target.display(), error);
+                    }
+                    if let Some(progress) = &self.options.progress {
+                        if let Ok(mut state) = progress.lock() {
+                            state.current += 1;
+                            state.message = format!("Skipped {}", target.display());
+                        }
                     }
                     None
                 }

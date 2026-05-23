@@ -1,4 +1,5 @@
 mod config;
+mod constants;
 mod detection;
 mod errors;
 mod filters;
@@ -9,31 +10,76 @@ mod types;
 mod utils;
 
 use {
-    crate::output::print_scan_report_structured,
-    crate::scanner::scan::CollapseScanner,
-    crate::types::{DetectionMode, FindingType, ScanResult, ScannerOptions},
+    crate::{
+        output::{
+            print_detailed_file_report, print_finding_statistics, print_general_info,
+            print_severity_matrix,
+        },
+        scanner::scan::CollapseScanner,
+        types::{DetectionMode, FindingType, Progress, ProgressScope, ScanResult, ScannerOptions},
+    },
     clap::Parser,
     colored::Colorize,
+    indicatif::{ProgressBar, ProgressStyle},
+    serde::Deserialize,
     serde_json::json,
-    std::collections::{HashMap, HashSet},
-    std::fs,
-    std::io::{self},
-    std::path::{Path, PathBuf},
-    std::time::Duration,
+    std::{
+        collections::{HashMap, HashSet},
+        fs,
+        io::{self, IsTerminal},
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    },
     walkdir::WalkDir,
 };
 
-#[derive(Parser)]
+#[derive(Debug, Deserialize, Default)]
+struct FileConfig {
+    path: Option<String>,
+    verbose: Option<bool>,
+    output: Option<String>,
+    json: Option<bool>,
+    mode: Option<String>,
+    ignore_keywords: Option<PathBuf>,
+    exclude: Option<Vec<String>>,
+    find: Option<Vec<String>>,
+    threads: Option<usize>,
+}
+
+#[derive(Clone)]
+struct ResolvedArgs {
+    path: Option<String>,
+    verbose: bool,
+    output: Option<String>,
+    json: bool,
+    mode: DetectionMode,
+    ignore_keywords: Option<PathBuf>,
+    exclude: Vec<String>,
+    find: Vec<String>,
+    threads: usize,
+    config: Option<PathBuf>,
+}
+
+#[derive(Parser, Clone)]
 #[clap(
     name = "CollapseScanner",
     author,
     version,
     about = "Static triage for Java JARs, class files, and nested archive contents",
-    long_about = "CollapseScanner inspects Java artifacts without running them. It looks for risky APIs, hardcoded infrastructure, token-like secrets, obfuscation, native payloads, and archive anomalies."
+    long_about = "CollapseScanner inspects Java jars without running them. It looks for risky APIs, hardcoded infrastructure, token-like secrets, obfuscation, native payloads, and archive anomalies.\n\nExamples:\n  collapsescanner sample.jar\n  collapsescanner mods/ --mode network\n  collapsescanner sample.jar --config scanner.toml\n  collapsescanner mods/ --json --output report.json"
 )]
 struct Args {
     #[clap(value_parser, help = "JAR, class file, or directory to scan")]
     path: Option<String>,
+
+    #[clap(
+        long,
+        value_parser,
+        help = "Load default scan settings from this TOML file"
+    )]
+    config: Option<PathBuf>,
 
     #[clap(short, long, action = clap::ArgAction::SetTrue, help = "Print parser and scanning details")]
     verbose: bool,
@@ -53,13 +99,8 @@ struct Args {
     )]
     json: bool,
 
-    #[clap(
-        value_enum,
-        long,
-        default_value = "all",
-        help = "Detection group to run"
-    )]
-    mode: DetectionMode,
+    #[clap(value_enum, long, help = "Detection group to run (default: all)")]
+    mode: Option<DetectionMode>,
 
     #[clap(long, value_parser, help = "File with suspicious keywords to suppress")]
     ignore_keywords: Option<PathBuf>,
@@ -73,10 +114,98 @@ struct Args {
     #[clap(
         long,
         value_parser,
-        default_value_t = 0,
         help = "Worker threads to use; 0 lets Rayon decide"
     )]
-    threads: usize,
+    threads: Option<usize>,
+}
+
+struct ProgressReporter {
+    shared: Option<Arc<Mutex<Progress>>>,
+    render_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl ProgressReporter {
+    fn start(enabled: bool) -> Self {
+        if !enabled {
+            return Self {
+                shared: None,
+                render_handle: None,
+            };
+        }
+
+        let shared = Arc::new(Mutex::new(Progress {
+            current: 0,
+            total: 0,
+            message: "Preparing scan".to_string(),
+            cancelled: false,
+            finished: false,
+            scope: ProgressScope::Preparing,
+        }));
+
+        let render_state = Arc::clone(&shared);
+        let render_handle = thread::spawn(move || {
+            let progress_bar = ProgressBar::new_spinner();
+            let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .expect("valid spinner template");
+            let bar_style = ProgressStyle::with_template(
+                "{spinner:.cyan} {prefix:<8} [{wide_bar:.cyan/blue}] {pos:>4}/{len:<4} {msg}",
+            )
+            .expect("valid progress template");
+
+            progress_bar.enable_steady_tick(Duration::from_millis(120));
+
+            loop {
+                let snapshot = match render_state.lock() {
+                    Ok(state) => state.clone(),
+                    Err(_) => break,
+                };
+
+                if snapshot.total > 0 {
+                    progress_bar.set_style(bar_style.clone());
+                    progress_bar.set_prefix(snapshot.scope.label().to_string());
+                    progress_bar.set_length(snapshot.total as u64);
+                    progress_bar.set_position(snapshot.current.min(snapshot.total) as u64);
+                } else {
+                    progress_bar.set_style(spinner_style.clone());
+                    progress_bar.set_prefix("");
+                }
+
+                progress_bar.set_message(snapshot.message.clone());
+
+                if snapshot.finished {
+                    progress_bar.finish_and_clear();
+                    break;
+                }
+
+                thread::sleep(Duration::from_millis(80));
+            }
+        });
+
+        Self {
+            shared: Some(shared),
+            render_handle: Some(render_handle),
+        }
+    }
+
+    fn shared_state(&self) -> Option<Arc<Mutex<Progress>>> {
+        self.shared.clone()
+    }
+
+    fn finish(mut self, message: impl Into<String>) {
+        if let Some(state) = &self.shared {
+            if let Ok(mut progress) = state.lock() {
+                progress.message = message.into();
+                progress.finished = true;
+                if progress.total > 0 {
+                    progress.current = progress.current.min(progress.total);
+                }
+            }
+        }
+
+        if let Some(handle) = self.render_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 const BANNER_BOX: &str =
@@ -105,18 +234,100 @@ fn print_banner() {
     println!("{}", BANNER_BOTTOM.bright_blue().bold());
 }
 
-fn create_scanner_options(args: &Args) -> ScannerOptions {
+fn load_file_config(path: &Path) -> Result<FileConfig, Box<dyn std::error::Error>> {
+    let file_contents = fs::read_to_string(path)?;
+    Ok(toml::from_str(&file_contents)?)
+}
+
+fn merge_string_lists(config_values: Option<Vec<String>>, cli_values: Vec<String>) -> Vec<String> {
+    let mut merged = config_values.unwrap_or_default();
+
+    for value in cli_values {
+        if !merged.iter().any(|existing| existing == &value) {
+            merged.push(value);
+        }
+    }
+
+    merged
+}
+
+fn parse_detection_mode(raw_mode: &str) -> Result<DetectionMode, Box<dyn std::error::Error>> {
+    match raw_mode.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(DetectionMode::All),
+        "network" => Ok(DetectionMode::Network),
+        "malicious" => Ok(DetectionMode::Malicious),
+        "obfuscation" => Ok(DetectionMode::Obfuscation),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Unsupported config mode '{other}'. Expected one of: all, network, malicious, obfuscation"
+            ),
+        )
+        .into()),
+    }
+}
+
+fn resolve_args(args: Args) -> Result<ResolvedArgs, Box<dyn std::error::Error>> {
+    let config = if let Some(config_path) = &args.config {
+        Some(load_file_config(config_path)?)
+    } else {
+        None
+    };
+
+    let config_mode = match config.as_ref().and_then(|cfg| cfg.mode.as_deref()) {
+        Some(raw_mode) => Some(parse_detection_mode(raw_mode)?),
+        None => None,
+    };
+
+    Ok(ResolvedArgs {
+        path: args
+            .path
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.path.clone())),
+        verbose: if args.verbose {
+            true
+        } else {
+            config.as_ref().and_then(|cfg| cfg.verbose).unwrap_or(false)
+        },
+        output: args
+            .output
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.output.clone())),
+        json: if args.json {
+            true
+        } else {
+            config.as_ref().and_then(|cfg| cfg.json).unwrap_or(false)
+        },
+        mode: args.mode.or(config_mode).unwrap_or(DetectionMode::All),
+        ignore_keywords: args
+            .ignore_keywords
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.ignore_keywords.clone())),
+        exclude: merge_string_lists(
+            config.as_ref().and_then(|cfg| cfg.exclude.clone()),
+            args.exclude,
+        ),
+        find: merge_string_lists(config.as_ref().and_then(|cfg| cfg.find.clone()), args.find),
+        threads: args
+            .threads
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.threads))
+            .unwrap_or(0),
+        config: args.config,
+    })
+}
+
+fn create_scanner_options(
+    args: &ResolvedArgs,
+    progress: Option<Arc<Mutex<Progress>>>,
+) -> ScannerOptions {
     ScannerOptions {
         mode: args.mode,
         verbose: args.verbose,
         ignore_keywords_file: args.ignore_keywords.clone(),
         exclude_patterns: args.exclude.clone(),
         find_patterns: args.find.clone(),
-        progress: None,
+        progress,
     }
 }
 
-fn configure_threading(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn configure_threading(args: &ResolvedArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = rayon::ThreadPoolBuilder::new().stack_size(64 * 1024 * 1024);
 
     if args.threads > 0 {
@@ -138,7 +349,7 @@ fn configure_threading(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn validate_and_prepare_path(args: &Args) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn validate_and_prepare_path(args: &ResolvedArgs) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path_arg = args.path.clone().unwrap_or_else(|| ".".to_string());
     let path = PathBuf::from(&path_arg);
     if !path.exists() {
@@ -158,7 +369,7 @@ fn mode_description(mode: DetectionMode) -> &'static str {
     }
 }
 
-fn print_scan_configuration(path: &Path, args: &Args, scanner: &CollapseScanner) {
+fn print_scan_configuration(path: &Path, args: &ResolvedArgs, scanner: &CollapseScanner) {
     println!("\n{}", "Scan setup".bright_white().bold());
     println!("  Target : {}", path.display().to_string().bright_white());
     println!(
@@ -170,7 +381,11 @@ fn print_scan_configuration(path: &Path, args: &Args, scanner: &CollapseScanner)
     print_optional_configurations(scanner, args);
 }
 
-fn print_optional_configurations(scanner: &CollapseScanner, args: &Args) {
+fn print_optional_configurations(scanner: &CollapseScanner, args: &ResolvedArgs) {
+    if let Some(config_path) = &args.config {
+        println!("  Config : {}", config_path.display().to_string().dimmed());
+    }
+
     if !scanner.options.exclude_patterns.is_empty() {
         println!("  Exclude:");
         for pattern in &scanner.options.exclude_patterns {
@@ -263,6 +478,24 @@ fn build_json_report(
     let (score, _, risk_level) = calculate_scan_score(significant_results);
     let total_findings: usize = significant_results.iter().map(|r| r.matches.len()).sum();
 
+    let compact_results: Vec<serde_json::Value> = significant_results
+        .iter()
+        .map(|r| {
+            let findings: Vec<serde_json::Value> = r
+                .matches
+                .iter()
+                .map(|(ft, val)| json!({"type": format!("{:?}", ft), "value": val}))
+                .collect();
+
+            json!({
+                "file_path": r.file_path,
+                "danger_score": r.danger_score,
+                "danger_explanation": r.danger_explanation,
+                "findings": findings
+            })
+        })
+        .collect();
+
     json!({
         "scan_time_seconds": elapsed.as_secs_f64(),
         "total_files_scanned": results.len(),
@@ -270,7 +503,7 @@ fn build_json_report(
         "total_findings": total_findings,
         "risk_level": risk_level,
         "score": score,
-        "results": significant_results
+        "results": compact_results
     })
 }
 
@@ -344,7 +577,6 @@ fn print_empty_scan_result(path: &Path, scanner: &CollapseScanner) {
 }
 
 fn print_text_report(
-    results: &[ScanResult],
     significant_results: Vec<&ScanResult>,
     path: &Path,
     scanner: &CollapseScanner,
@@ -358,48 +590,24 @@ fn print_text_report(
     let mut sorted_results = significant_results;
     sorted_results.sort_by_key(|r| &r.file_path);
 
-    let (total_findings, _all_findings) = collect_finding_stats(&sorted_results);
-
     print_section_header("SCAN SUMMARY");
 
-    if total_findings == 0 {
-        let (scan_time, scan_rate) = format_scan_stats(elapsed, results.len());
-        println!(
-            "\n[+] {}",
-            "No specific findings in the selected mode.".green()
-        );
-        println!(
-            "[*] Scan time: {:.2}s | Processing rate: {:.1} files/sec",
-            scan_time, scan_rate
-        );
+    if sorted_results.is_empty() {
         return;
     }
 
-    let (score, score_color, risk_level) = calculate_scan_score(&sorted_results);
-    let (scan_time, scan_rate) = format_scan_stats(elapsed, results.len());
+    print_detailed_file_report(&sorted_results);
 
-    println!(
-        "\nRisk: {} ({}/10)",
-        risk_level.color(score_color).bold(),
-        score
-    );
-    println!(
-        "Findings: {} across {} file(s)",
-        total_findings.to_string().bright_white().bold(),
-        sorted_results.len().to_string().bright_white().bold()
-    );
-    println!(
-        "Scanned: {} file(s) in {:.2}s ({:.1} files/sec)",
-        results.len().to_string().bright_white(),
-        scan_time,
-        scan_rate
-    );
+    print_severity_matrix(&sorted_results);
+    print_finding_statistics(&sorted_results);
 
-    print_scan_report_structured(&sorted_results);
+    print_general_info(&sorted_results, elapsed);
+
+    println!("Scan complete. Review the findings above");
 }
 
 fn handle_json_output(
-    args: &Args,
+    args: &ResolvedArgs,
     results: &[ScanResult],
     significant_results: &[&ScanResult],
     elapsed: Duration,
@@ -418,7 +626,7 @@ fn handle_json_output(
 }
 
 fn maybe_write_text_mode_json_report(
-    args: &Args,
+    args: &ResolvedArgs,
     results: &[ScanResult],
     scanner: &CollapseScanner,
     elapsed: Duration,
@@ -441,9 +649,14 @@ fn maybe_write_text_mode_json_report(
     Ok(())
 }
 
+fn should_render_progress(args: &ResolvedArgs) -> bool {
+    !args.json && io::stderr().is_terminal()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    let options = create_scanner_options(&args);
+    let args = resolve_args(Args::parse())?;
+    let progress_reporter = ProgressReporter::start(should_render_progress(&args));
+    let options = create_scanner_options(&args, progress_reporter.shared_state());
 
     if !args.json {
         print_banner();
@@ -456,7 +669,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !args.json {
         print_scan_configuration(&path, &args, &scanner);
-        println!("\n>>> {}", "Scanning...".bright_green());
+        if !should_render_progress(&args) {
+            println!("\n>>> {}", "Scanning...".bright_green());
+        }
     }
 
     let scan_start_time = std::time::Instant::now();
@@ -469,12 +684,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|r| !r.matches.is_empty() || scanner.options.verbose)
                 .collect();
 
+            progress_reporter.finish(format!(
+                "Scanned {} file(s) in {:.2}s",
+                results.len(),
+                elapsed.as_secs_f64()
+            ));
+
             if args.json {
                 handle_json_output(&args, &results, &significant_results, elapsed)?;
                 return Ok(());
             }
 
-            print_text_report(&results, significant_results, &path, &scanner, elapsed);
+            print_text_report(significant_results, &path, &scanner, elapsed);
 
             let found_custom_jvm = *scanner.found_custom_jvm_indicator.lock().unwrap();
             if found_custom_jvm {
@@ -488,6 +709,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             maybe_write_text_mode_json_report(&args, &results, &scanner, elapsed)?;
         }
         Err(error) => {
+            progress_reporter.finish("Scan failed".to_string());
+
             if args.json {
                 let error_json = json!({
                     "error": error.to_string()

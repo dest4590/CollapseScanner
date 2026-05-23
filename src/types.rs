@@ -39,6 +39,25 @@ pub struct Progress {
     pub total: usize,
     pub message: String,
     pub cancelled: bool,
+    pub finished: bool,
+    pub scope: ProgressScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressScope {
+    Preparing,
+    Targets,
+    JarEntries,
+}
+
+impl ProgressScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            ProgressScope::Preparing => "scan",
+            ProgressScope::Targets => "files",
+            ProgressScope::JarEntries => "entries",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]

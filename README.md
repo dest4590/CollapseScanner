@@ -1,6 +1,6 @@
 # CollapseScanner
 
-CollapseScanner is a local static scanner for Java artifacts. Point it at a `.jar`, a `.class` file, or a directory, and it will look for the parts you probably want to inspect first.
+CollapseScanner is a local static scanner for Java jars. Point it at a `.jar`, a `.class` file, or a directory, and it will look for the parts you probably want to inspect first.
 
 It does not run the sample. It does not decompile everything into source. It reads class structure, bytecode references, strings, and archive contents, then gives you a short risk-focused report.
 
@@ -57,8 +57,21 @@ collapsescanner <path> --json --output report.json
 # Scan only matching entries
 collapsescanner mods/ --find "*.class" --exclude "META-INF/*"
 
+# Load repeatable settings from a TOML config file
+collapsescanner sample.jar --config scanner.toml
+
 # Use a fixed worker count
 collapsescanner sample.jar --threads 8
+```
+
+Example `scanner.toml`:
+
+```toml
+mode = "all"
+threads = 0
+exclude = ["META-INF/*", "**/test/**"]
+find = ["*.jar", "*.class"]
+ignore_keywords = "ignore-keywords.txt"
 ```
 
 ## Output
@@ -89,6 +102,8 @@ Start here
 
 Use `--json` when you want stable machine-readable output. Use `--output` with or without `--json` to save the same JSON report to disk.
 
+When you run the normal terminal report interactively, CollapseScanner now shows a simple live progress bar automatically. It stays out of the way for JSON output and other non-interactive output.
+
 ## Modes
 
 `all` runs every detector and is the default.
@@ -104,3 +119,5 @@ Use `--json` when you want stable machine-readable output. Use `--output` with o
 CollapseScanner is static analysis. It will not see behavior that only appears at runtime, and it will not prove that a file is malicious. Treat the score as a triage hint, not a verdict.
 
 It is usually a good first pass before opening a decompiler or running a sample in a sandbox.
+
+CLI flags override values loaded from `--config`, so the config file works well as a baseline and one-off command-line options can still narrow or expand a scan.

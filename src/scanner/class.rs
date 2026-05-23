@@ -1,8 +1,8 @@
+use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use once_cell::sync::Lazy;
 
 use crate::detection::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
 use crate::errors::ScanError;
@@ -20,12 +20,14 @@ const MIN_BASE64_BLOB_LEN: usize = 512;
 const MIN_HEX_BLOB_LEN: usize = 1024;
 const BASE64_ENTROPY_THRESHOLD: f64 = 5.0;
 const HEX_ENTROPY_THRESHOLD: f64 = 3.8;
+const PARALLEL_STRING_SCAN_THRESHOLD: usize = 96;
 
-static REFLECTIVE_CLASS_LOADING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)class\.forname\s*\(").unwrap());
-static REFLECTIVE_METHOD_ACCESS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)getmethod|getdeclaredmethod").unwrap());
-static DIRECT_MEMORY_ACCESS: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)sun\.misc\.unsafe|jdk\.internal\.misc\.unsafe").unwrap());
-static BYTECODE_INVOCATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)invokestatic|invokespecial|invokevirtual").unwrap());
-static GENERIC_TYPE_MANIPULATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)creatensforprefix|genericsignature").unwrap());
+static DIRECT_MEMORY_ACCESS: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)sun\.misc\.unsafe|jdk\.internal\.misc\.unsafe").unwrap());
+static BYTECODE_INVOCATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)invokestatic|invokespecial|invokevirtual").unwrap());
+static GENERIC_TYPE_MANIPULATION: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)creatensforprefix|genericsignature").unwrap());
 
 impl CollapseScanner {
     const MAX_SCAN_STRING_LEN: usize = 2048;
@@ -205,8 +207,6 @@ impl CollapseScanner {
         }
 
         let reflective_patterns = [
-            (&*REFLECTIVE_CLASS_LOADING, "Reflective class loading"),
-            (&*REFLECTIVE_METHOD_ACCESS, "Reflective method access"),
             (&*DIRECT_MEMORY_ACCESS, "Direct memory access"),
             (&*BYTECODE_INVOCATION, "Bytecode invocation"),
             (&*GENERIC_TYPE_MANIPULATION, "Generic type manipulation"),
@@ -248,7 +248,7 @@ impl CollapseScanner {
     }
 
     fn analyze_base64_candidate(&self, input: &str) -> Option<f64> {
-        if input.len() < MIN_BASE64_BLOB_LEN || input.len() % 4 != 0 {
+        if input.len() < MIN_BASE64_BLOB_LEN || !input.len().is_multiple_of(4) {
             return None;
         }
 
@@ -296,7 +296,7 @@ impl CollapseScanner {
     }
 
     fn analyze_hex_candidate(&self, input: &str) -> Option<f64> {
-        if input.len() < MIN_HEX_BLOB_LEN || input.len() % 2 != 0 {
+        if input.len() < MIN_HEX_BLOB_LEN || !input.len().is_multiple_of(2) {
             return None;
         }
 
@@ -383,6 +383,80 @@ impl CollapseScanner {
         self.check_encoded_payloads(string, findings);
 
         findings.len() == initial_len
+    }
+
+    fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+        let needle_bytes = needle.as_bytes();
+
+        haystack
+            .as_bytes()
+            .windows(needle_bytes.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+    }
+
+    fn looks_like_network_candidate(input: &str) -> bool {
+        input.bytes().any(|byte| byte.is_ascii_digit())
+            || input.contains('.')
+            || input.contains(':')
+            || input.contains('/')
+            || Self::contains_ascii_case_insensitive(input, "http")
+            || Self::contains_ascii_case_insensitive(input, "www")
+            || Self::contains_ascii_case_insensitive(input, "ftp")
+    }
+
+    fn looks_like_token_blob(input: &str) -> bool {
+        input.len() >= MIN_BASE64_BLOB_LEN
+            && input.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'+' | b'/' | b'=' | b'-' | b'_' | b'.' | b':')
+            })
+    }
+
+    fn looks_like_malicious_candidate(input: &str) -> bool {
+        Self::looks_like_token_blob(input)
+            || input.contains('=')
+            || input.contains(':')
+            || input.contains('_')
+            || input.contains('/')
+            || input.contains('\\')
+            || input.contains('.')
+            || [
+                "runtime", "process", "class", "unsafe", "token", "secret", "password", "webhook",
+                "discord", "key",
+            ]
+            .iter()
+            .any(|needle| Self::contains_ascii_case_insensitive(input, needle))
+    }
+
+    fn should_scan_string_candidate(&self, input: &str) -> bool {
+        match self.options.mode {
+            DetectionMode::All => {
+                Self::looks_like_network_candidate(input)
+                    || Self::looks_like_malicious_candidate(input)
+            }
+            DetectionMode::Network => Self::looks_like_network_candidate(input),
+            DetectionMode::Malicious => Self::looks_like_malicious_candidate(input),
+            DetectionMode::Obfuscation => false,
+        }
+    }
+
+    fn scan_one_string(
+        &self,
+        value: &str,
+        check_fn: fn(&Self, &str, &mut Vec<(FindingType, String)>) -> bool,
+    ) -> Vec<(FindingType, String)> {
+        let mut local = Vec::new();
+        let (string_to_check, truncated_due_to_boundary) = self.truncate_scan_string(value);
+
+        if truncated_due_to_boundary {
+            self.push_truncation_finding(value, &mut local);
+        }
+
+        if check_fn(self, string_to_check, &mut local) {
+            cache_safe_string(value);
+        }
+
+        local
     }
 
     fn check_network_patterns_combined(
@@ -671,7 +745,7 @@ impl CollapseScanner {
         if let Some(api_markers) = by_type.get(&FindingType::SuspiciousApi) {
             if !api_markers.is_empty() {
                 explanations.push(format!(
-                    "Uses {} high-risk Java API marker(s) related to command execution, reflection, class loading, or instrumentation.",
+                    "Uses {} high-risk Java API marker(s) related to command execution, class loading, or instrumentation.",
                     api_markers.len()
                 ));
             }
@@ -706,7 +780,7 @@ impl CollapseScanner {
         if let Some(native_libraries) = by_type.get(&FindingType::NativeLibrary) {
             if !native_libraries.is_empty() {
                 explanations.push(format!(
-                    "Bundles {} native library resource(s). Embedded native code should be reviewed carefully because it bypasses normal JVM bytecode inspection.",
+                    "Bundles {} native library resource(s).",
                     native_libraries.len()
                 ));
             }
@@ -715,7 +789,7 @@ impl CollapseScanner {
         if let Some(archive_entries) = by_type.get(&FindingType::SuspiciousArchiveEntry) {
             if !archive_entries.is_empty() {
                 explanations.push(format!(
-                    "Contains {} suspicious embedded resource(s) such as scripts, executables, agent manifests, or heavily packed files.",
+                    "Contains {} suspicious embedded resource(s) such as scripts, executables, or heavily packed files.",
                     archive_entries.len()
                 ));
             }
@@ -723,7 +797,7 @@ impl CollapseScanner {
 
         if resource_info.is_some_and(|ri| ri.is_dead_class_candidate) {
             explanations.push(
-                "Contains custom JVM bytecode (0xDEAD) which may indicate use of a custom classloader to evade detection.".to_string()
+                "Contains custom JVM bytecode (0xDEAD) which may indicate use of a custom classloader, reverse the jvm.dll.".to_string()
             );
         }
 
@@ -825,14 +899,17 @@ impl CollapseScanner {
     }
 
     fn prepare_strings_for_scanning<'a>(&self, class_details: &'a ClassDetails) -> Vec<&'a String> {
-        let strings_to_scan = class_details
+        class_details
             .strings
             .iter()
-            .filter(|s| !s.is_empty() && s.len() >= 3 && !is_cached_safe_string(s))
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() >= 3
+                    && !is_cached_safe_string(s)
+                    && self.should_scan_string_candidate(s)
+            })
             .take(2000)
-            .collect::<Vec<_>>();
-
-        strings_to_scan
+            .collect::<Vec<_>>()
     }
 
     fn scan_strings_by_mode(
@@ -868,24 +945,18 @@ impl CollapseScanner {
         findings: &mut Vec<(FindingType, String)>,
         check_fn: fn(&Self, &str, &mut Vec<(FindingType, String)>) -> bool,
     ) {
-        let partials: Vec<Vec<(FindingType, String)>> = strings_to_scan
-            .par_iter()
-            .map(|s| {
-                let mut local = Vec::new();
-                let s_ref = s.as_str();
-                let (s_to_check, truncated_due_to_boundary) = self.truncate_scan_string(s_ref);
-
-                if truncated_due_to_boundary {
-                    self.push_truncation_finding(s_ref, &mut local);
-                }
-
-                if check_fn(self, s_to_check, &mut local) {
-                    cache_safe_string(s_ref);
-                }
-
-                local
-            })
-            .collect();
+        let partials: Vec<Vec<(FindingType, String)>> =
+            if strings_to_scan.len() >= PARALLEL_STRING_SCAN_THRESHOLD {
+                strings_to_scan
+                    .par_iter()
+                    .map(|s| self.scan_one_string(s.as_str(), check_fn))
+                    .collect()
+            } else {
+                strings_to_scan
+                    .iter()
+                    .map(|s| self.scan_one_string(s.as_str(), check_fn))
+                    .collect()
+            };
 
         for mut partial in partials {
             findings.append(&mut partial);

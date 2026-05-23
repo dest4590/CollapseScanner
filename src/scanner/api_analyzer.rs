@@ -1,52 +1,10 @@
+use crate::constants::{
+    ATTACH_API_MARKERS, DYNAMIC_LOADING_MARKERS, JAVA_AGENT_MARKERS, NATIVE_BRIDGE_MARKERS,
+    SAFE_NATIVE_CALLS, SCRIPT_ENGINE_MARKERS,
+};
 use crate::types::{ClassDetails, FindingType, MethodCallInfo};
 use crate::utils::truncate_string;
 use std::collections::HashSet;
-
-pub const PROCESS_EXECUTION_MARKERS: &[&str] = &[
-    "java/lang/Runtime",
-    "getRuntime",
-    "exec",
-    "ProcessBuilder",
-    "java/lang/ProcessBuilder",
-];
-
-pub const REFLECTION_MARKERS: &[&str] = &[
-    "java/lang/reflect/Method",
-    "java/lang/reflect/Field",
-    "java/lang/reflect/Constructor",
-    "setAccessible",
-    "invoke",
-];
-
-pub const DYNAMIC_LOADING_MARKERS: &[&str] = &[
-    "defineClass",
-    "URLClassLoader",
-    "MethodHandles$Lookup",
-    "Lookup.defineClass",
-];
-
-pub const SCRIPT_ENGINE_MARKERS: &[&str] = &[
-    "javax/script/ScriptEngineManager",
-    "javax/script/ScriptEngine",
-];
-
-pub const JAVA_AGENT_MARKERS: &[&str] = &[
-    "java/lang/instrument/Instrumentation",
-    "Premain-Class",
-    "Agent-Class",
-    "Launcher-Agent-Class",
-];
-
-pub const ATTACH_API_MARKERS: &[&str] = &[
-    "com/sun/tools/attach/VirtualMachine",
-    "sun/tools/attach/HotSpotVirtualMachine",
-];
-
-pub const NATIVE_BRIDGE_MARKERS: &[&str] = &[
-    "com/sun/jna/Native",
-    "com/sun/jna/Library",
-    "sun/misc/Unsafe",
-];
 
 pub struct ApiAnalyzer;
 
@@ -54,35 +12,115 @@ impl ApiAnalyzer {
     pub fn analyze(details: &ClassDetails, findings: &mut Vec<(FindingType, String)>) {
         let string_set: HashSet<&str> = details.strings.iter().map(String::as_str).collect();
 
-        if PROCESS_EXECUTION_MARKERS
+        let process_calls: Vec<String> = details
+            .method_calls
             .iter()
-            .any(|m| string_set.contains(m))
-        {
-            let cmd = Self::guess_command(details);
+            .filter(|call| Self::is_process_api_call(call))
+            .map(Self::format_process_call)
+            .collect();
+
+        if !process_calls.is_empty() {
+            let call_summary = if process_calls.len() == 1 {
+                process_calls[0].clone()
+            } else {
+                format!(
+                    "{} (and {} more)",
+                    process_calls[0],
+                    process_calls.len() - 1
+                )
+            };
             findings.push((
                 FindingType::SuspiciousApi,
-                format!(
-                    "Process execution API usage{}",
-                    if cmd.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!(": Likely running \"{}\"", cmd)
-                    }
-                ),
+                format!("Process execution API usage: {}", call_summary),
             ));
         }
 
-        if REFLECTION_MARKERS.iter().any(|m| string_set.contains(m)) {
-            let target = Self::guess_reflected_target(details);
+        let native_methods: Vec<String> = details
+            .methods
+            .iter()
+            .filter(|method| method.access_flags & 0x0100 != 0)
+            .map(|method| method.name.clone())
+            .collect();
+
+        if !native_methods.is_empty() {
+            let method_summary = if native_methods.len() == 1 {
+                native_methods[0].clone()
+            } else {
+                format!(
+                    "{} (and {} more)",
+                    native_methods[0],
+                    native_methods.len() - 1
+                )
+            };
+            findings.push((
+                FindingType::SuspiciousApi,
+                format!("Native method declaration: {}", method_summary),
+            ));
+        }
+
+        let native_calls: Vec<String> = details
+            .method_calls
+            .iter()
+            .filter(|call| {
+                NATIVE_BRIDGE_MARKERS.iter().any(|marker| {
+                    if marker.ends_with('/') {
+                        call.owner.starts_with(marker)
+                    } else {
+                        call.owner == *marker
+                    }
+                })
+            })
+            .map(Self::format_native_call)
+            .filter(|sig| !SAFE_NATIVE_CALLS.iter().any(|&s| sig.starts_with(s)))
+            .collect();
+
+        let mut matched_markers: Vec<&str> = details
+            .strings
+            .iter()
+            .filter(|s| !s.starts_with('('))
+            .filter_map(|s| {
+                for marker in NATIVE_BRIDGE_MARKERS {
+                    if marker.ends_with('/') {
+                        if s.contains(marker) {
+                            return Some(s.as_str());
+                        }
+                    } else if s == marker {
+                        return Some(s.as_str());
+                    }
+                }
+                None
+            })
+            .filter(|&marker_str| !Self::is_safe_reference(marker_str))
+            .collect();
+
+        matched_markers.sort_unstable();
+        matched_markers.dedup();
+
+        if !native_calls.is_empty() {
+            let call_summary = if native_calls.len() == 1 {
+                native_calls[0].clone()
+            } else {
+                format!("{} (and {} more)", native_calls[0], native_calls.len() - 1)
+            };
+            findings.push((
+                FindingType::SuspiciousApi,
+                format!("Native bridge or Unsafe API usage:\n\t{}", call_summary),
+            ));
+        } else if !matched_markers.is_empty() {
+            let string_summary = if matched_markers.len() == 1 {
+                matched_markers[0].to_string()
+            } else {
+                format!(
+                    "{} (and {} more)",
+                    matched_markers[0],
+                    matched_markers.len() - 1
+                )
+            };
             findings.push((
                 FindingType::SuspiciousApi,
                 format!(
-                    "Reflection-based access{}",
-                    if target.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!(": Likely targeting \"{}\"", target)
-                    }
+                    "Native bridge or Unsafe API usage (referenced in constant pool: {})",
+                    string_summary
                 ),
             ));
         }
@@ -111,49 +149,95 @@ impl ApiAnalyzer {
             "JVM attach API usage",
             findings,
         );
-        Self::check_marker(
-            &string_set,
-            NATIVE_BRIDGE_MARKERS,
-            "Native bridge or Unsafe API usage",
-            findings,
-        );
+    }
+
+    fn is_safe_reference(s: &str) -> bool {
+        let dot_normalized = s.replace('/', ".");
+        let mut index = 0;
+
+        while index < dot_normalized.len() {
+            if let Some(pos) = dot_normalized[index..].find("com.sun.jna") {
+                let absolute_pos = index + pos;
+                let sub = &dot_normalized[absolute_pos..];
+                let matches_safe = SAFE_NATIVE_CALLS.iter().any(|&safe| sub.starts_with(safe));
+                if !matches_safe {
+                    return false;
+                }
+                index = absolute_pos + "com.sun.jna".len();
+            } else if let Some(pos) = dot_normalized[index..].find("sun.misc.Unsafe") {
+                let absolute_pos = index + pos;
+                let sub = &dot_normalized[absolute_pos..];
+                let matches_safe = SAFE_NATIVE_CALLS.iter().any(|&safe| sub.starts_with(safe));
+                if !matches_safe {
+                    return false;
+                }
+                index = absolute_pos + "sun.misc.Unsafe".len();
+            } else {
+                break;
+            }
+        }
+        true
     }
 
     fn check_marker(
         string_set: &HashSet<&str>,
         markers: &[&str],
-        message: &str,
+        category_message: &str,
         findings: &mut Vec<(FindingType, String)>,
     ) {
-        if markers.iter().any(|marker| string_set.contains(marker)) {
-            findings.push((FindingType::SuspiciousApi, message.to_string()));
+        let matched: Vec<&str> = markers
+            .iter()
+            .filter(|&&marker| string_set.iter().any(|&s| s.contains(marker)))
+            .copied()
+            .collect();
+
+        if !matched.is_empty() {
+            let details = if matched.len() == 1 {
+                matched[0].to_string()
+            } else {
+                format!("{} (and {} more)", matched[0], matched.len() - 1)
+            };
+            findings.push((
+                FindingType::SuspiciousApi,
+                format!("{}: {}", category_message, details),
+            ));
         }
     }
 
-    fn guess_command(details: &ClassDetails) -> String {
-        if let Some(command) = Self::guess_command_from_calls(&details.method_calls) {
-            return command;
-        }
-
-        Self::guess_command_from_strings(&details.strings)
+    fn format_native_call(call: &MethodCallInfo) -> String {
+        format!(
+            "{}::{}{}",
+            call.owner.replace('/', "."),
+            call.name,
+            call.descriptor
+        )
     }
 
-    fn guess_command_from_strings(strings: &[String]) -> String {
-        for s in strings {
-            let lower = s.to_lowercase();
-            if lower.contains("cmd.exe")
-                || lower.contains("/bin/sh")
-                || lower.contains("/bin/bash")
-                || lower.contains("powershell")
-                || lower.contains("curl ")
-                || lower.contains("wget ")
-            {
-                return truncate_string(s, 60);
-            }
+    fn format_process_call(call: &MethodCallInfo) -> String {
+        let signature = Self::format_native_call(call);
+        if let Some(command) = Self::extract_process_command(call) {
+            format!("{} executed: \"{}\"", signature, command)
+        } else {
+            signature
         }
-        "".to_string()
     }
 
+    fn extract_process_command(call: &MethodCallInfo) -> Option<String> {
+        let args: Vec<String> = call
+            .arguments
+            .iter()
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect();
+
+        if args.is_empty() {
+            return None;
+        }
+
+        Some(truncate_string(&args.join(" "), 80))
+    }
+
+    #[allow(dead_code)]
     fn guess_reflected_target(details: &ClassDetails) -> String {
         if let Some(target) = Self::guess_reflected_target_from_calls(&details.method_calls) {
             return target;
@@ -172,19 +256,7 @@ impl ApiAnalyzer {
         "".to_string()
     }
 
-    fn guess_command_from_calls(method_calls: &[MethodCallInfo]) -> Option<String> {
-        for call in method_calls {
-            if Self::is_process_api_call(call) {
-                let args = Self::format_arguments(&call.arguments);
-                if !args.is_empty() {
-                    return Some(truncate_string(&args, 80));
-                }
-            }
-        }
-
-        None
-    }
-
+    #[allow(dead_code)]
     fn guess_reflected_target_from_calls(method_calls: &[MethodCallInfo]) -> Option<String> {
         for call in method_calls {
             if call.owner == "java/lang/Class"
@@ -208,57 +280,5 @@ impl ApiAnalyzer {
         (call.owner == "java/lang/Runtime" && call.name == "exec")
             || (call.owner == "java/lang/ProcessBuilder" && call.name == "<init>")
             || (call.owner == "java/lang/ProcessBuilder" && call.name == "command")
-    }
-
-    fn format_arguments(arguments: &[String]) -> String {
-        arguments
-            .iter()
-            .filter(|value| !value.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn empty_details(method_calls: Vec<MethodCallInfo>) -> ClassDetails {
-        ClassDetails {
-            class_name: "Example".to_string(),
-            superclass_name: "java/lang/Object".to_string(),
-            interfaces: Vec::new(),
-            methods: Vec::new(),
-            method_calls,
-            fields: Vec::new(),
-            strings: Vec::new(),
-            access_flags: 0,
-        }
-    }
-
-    #[test]
-    fn prefers_process_arguments_from_call_sites() {
-        let details = empty_details(vec![MethodCallInfo {
-            owner: "java/lang/Runtime".to_string(),
-            name: "exec".to_string(),
-            descriptor: "(Ljava/lang/String;)Ljava/lang/Process;".to_string(),
-            arguments: vec!["cmd.exe".to_string(), "/c".to_string(), "calc".to_string()],
-        }]);
-
-        assert_eq!(ApiAnalyzer::guess_command(&details), "cmd.exe /c calc");
-    }
-
-    #[test]
-    fn prefers_reflection_arguments_from_call_sites() {
-        let details = empty_details(vec![MethodCallInfo {
-            owner: "java/lang/Class".to_string(),
-            name: "getDeclaredMethod".to_string(),
-            descriptor: "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"
-                .to_string(),
-            arguments: vec!["loadClass".to_string()],
-        }]);
-
-        assert_eq!(ApiAnalyzer::guess_reflected_target(&details), "loadClass");
     }
 }
