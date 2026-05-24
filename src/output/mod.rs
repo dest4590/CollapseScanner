@@ -84,9 +84,9 @@ pub fn print_scan_config(
     verbose: bool,
 ) {
     println!("\n{}", "Scan setup".bright_white().bold());
-    println!("  Target : {}", path.display().to_string().bright_white());
+    println!("  Target: {}", path.display().to_string().bright_white());
     println!(
-        "  Mode   : {} ({})",
+        "  Mode: {} ({})",
         mode_label.bright_white(),
         mode_description.dimmed()
     );

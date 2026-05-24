@@ -57,11 +57,6 @@ pub static SUSSY_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
 pub const DYNAMIC_LOADING_MARKERS: &[&str] =
     &["defineClass", "URLClassLoader", "Lookup.defineClass"];
 
-pub const SCRIPT_ENGINE_MARKERS: &[&str] = &[
-    "javax/script/ScriptEngineManager",
-    "javax/script/ScriptEngine",
-];
-
 pub const JAVA_AGENT_MARKERS: &[&str] = &[
     "java/lang/instrument/Instrumentation",
     "Premain-Class",
@@ -78,8 +73,6 @@ pub const NATIVE_BRIDGE_MARKERS: &[&str] = &["com/sun/jna/", "sun/misc/Unsafe"];
 
 pub const SAFE_NATIVE_CALLS: &[&str] = &["sun.misc.Unsafe"];
 
-// Packages that are considered safe at package-level references (mentioning the package
-// without specific unsafe call signatures will not trigger native-bridge findings).
 pub const SAFE_NATIVE_PACKAGES: &[&str] =
     &["com.sun.jna", "com.sun.jna.platform", "com.sun.jna.Native"];
 
@@ -158,6 +151,7 @@ pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
         "microsoft.com",
         "live.com",
         "w3.org",
+        "shader-tutorial.dev",
     ]
     .into_iter()
     .map(str::to_owned)

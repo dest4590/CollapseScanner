@@ -14,8 +14,8 @@ use {
     crate::{
         output::{
             print_banner, print_detailed_file_report, print_empty_scan_result,
-            print_finding_statistics, print_general_info, print_scan_config, print_section_header,
-            print_severity_matrix, write_json_report,
+            print_finding_statistics, print_general_info, print_scan_config, print_severity_matrix,
+            write_json_report,
         },
         scanner::scan::CollapseScanner,
         types::{DetectionMode, Progress, ProgressScope, ScanResult, ScannerOptions},
@@ -150,11 +150,12 @@ impl ProgressReporter {
 
         let render_state = Arc::clone(&shared);
         let render_handle = thread::spawn(move || {
-            let progress_bar = ProgressBar::new_spinner();
-            let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {prefix}")
+            let mut progress_bar = ProgressBar::new_spinner();
+            let mut is_bar = false;
+            let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {prefix} {msg}")
                 .expect("valid spinner template");
             let bar_style =
-                ProgressStyle::with_template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len}")
+                ProgressStyle::with_template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")
                     .expect("valid progress template")
                     .progress_chars("#-");
 
@@ -166,17 +167,31 @@ impl ProgressReporter {
                     Err(_) => break,
                 };
 
+                let prefix = snapshot.scope.label().to_string();
+                let message = snapshot.message.clone();
+
                 if snapshot.total > 0 {
+                    if !is_bar {
+                        progress_bar.finish_and_clear();
+                        progress_bar = ProgressBar::new(snapshot.total as u64);
+                        is_bar = true;
+                    }
+
                     progress_bar.set_style(bar_style.clone());
-                    progress_bar.set_prefix(snapshot.scope.label().to_string());
                     progress_bar.set_length(snapshot.total as u64);
                     progress_bar.set_position(snapshot.current.min(snapshot.total) as u64);
                 } else {
+                    if is_bar {
+                        progress_bar.finish_and_clear();
+                        progress_bar = ProgressBar::new_spinner();
+                        is_bar = false;
+                        progress_bar.enable_steady_tick(Duration::from_millis(120));
+                    }
                     progress_bar.set_style(spinner_style.clone());
-                    progress_bar.set_prefix("");
                 }
 
-                progress_bar.set_message("".to_string());
+                progress_bar.set_prefix(prefix);
+                progress_bar.set_message(message);
 
                 if snapshot.finished {
                     progress_bar.finish_and_clear();
@@ -210,6 +225,10 @@ impl ProgressReporter {
 
         if let Some(handle) = self.render_handle.take() {
             let _ = handle.join();
+        }
+
+        if io::stderr().is_terminal() {
+            eprintln!("");
         }
     }
 }
@@ -481,8 +500,6 @@ fn render_text_report(
 
     let mut sorted_results = significant_results;
     sorted_results.sort_by_key(|r| &r.file_path);
-
-    print_section_header("SCAN SUMMARY");
 
     if sorted_results.is_empty() {
         return;

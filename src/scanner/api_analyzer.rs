@@ -1,6 +1,6 @@
 use crate::rules::{
     ATTACH_API_MARKERS, DYNAMIC_LOADING_MARKERS, JAVA_AGENT_MARKERS, NATIVE_BRIDGE_MARKERS,
-    SAFE_NATIVE_CALLS, SCRIPT_ENGINE_MARKERS,
+    SAFE_NATIVE_CALLS,
 };
 use crate::types::{ClassDetails, FindingType, MethodCallInfo};
 use crate::utils::truncate_string;
@@ -114,12 +114,7 @@ impl ApiAnalyzer {
             "Dynamic class loading or definition",
             findings,
         );
-        Self::check_marker(
-            &string_set,
-            SCRIPT_ENGINE_MARKERS,
-            "Script engine execution",
-            findings,
-        );
+
         Self::check_marker(
             &string_set,
             JAVA_AGENT_MARKERS,

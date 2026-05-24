@@ -12,7 +12,7 @@ CollapseScanner detects:
 - **Network infrastructure**: IPv4 and IPv6 addresses, URLs, suspicious domains, Discord webhooks, C2 indicators
 - **Secrets**: Token-like strings, hardcoded credentials, API keys, database URLs
 - **Obfuscation**: Unicode-based name tricks, tampered class files, suspicious compressions
-- **Native payloads**: Embedded binaries, native libraries (`.dll`, `.so`), script engines
+- **Native payloads**: Embedded binaries, native libraries (`.dll`, `.so`)
 - **Archive anomalies**: Nested archives, suspicious compression ratios, malformed entries
 
 The goal is triage. If a file is reaching out to strange infrastructure, using dangerous APIs, or looks obfuscated, CollapseScanner should flag it quickly.
