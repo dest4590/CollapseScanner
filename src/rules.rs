@@ -76,27 +76,12 @@ pub const ATTACH_API_MARKERS: &[&str] = &[
 
 pub const NATIVE_BRIDGE_MARKERS: &[&str] = &["com/sun/jna/", "sun/misc/Unsafe"];
 
-pub const SAFE_NATIVE_CALLS: &[&str] = &[
-    "com.sun.jna.Native::getLastError()I",
-    "com.sun.jna.Native::toString",
-    "com.sun.jna.Native::load",
-    "com.sun.jna.Native::getNativeSize",
-    "com.sun.jna.Platform",
-    "com.sun.jna.Memory",
-    "com.sun.jna.Structure",
-    "com.sun.jna.Pointer",
-    "com.sun.jna.NativeLong",
-    "com.sun.jna.Callback",
-    "com.sun.jna.Library",
-    "com.sun.jna.TypeMapper",
-    "com.sun.jna.Union",
-    "com.sun.jna.ptr",
-    "com.sun.jna.win32",
-    "com.sun.jna.platform",
-    "sun.misc.Unsafe",
-    "com/sun/jna/Native",
-    "sun/misc/Unsafe",
-];
+pub const SAFE_NATIVE_CALLS: &[&str] = &["sun.misc.Unsafe"];
+
+// Packages that are considered safe at package-level references (mentioning the package
+// without specific unsafe call signatures will not trigger native-bridge findings).
+pub const SAFE_NATIVE_PACKAGES: &[&str] =
+    &["com.sun.jna", "com.sun.jna.platform", "com.sun.jna.Native"];
 
 // ============================================================================
 // Pattern Matching Regex Objects

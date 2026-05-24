@@ -47,6 +47,12 @@ impl ApiAnalyzer {
                     }
                 })
             })
+            .filter(|call| {
+                if call.owner.starts_with("com/sun/jna") {
+                    return false;
+                }
+                true
+            })
             .map(Self::format_native_call)
             .filter(|sig| !SAFE_NATIVE_CALLS.iter().any(|&s| sig.starts_with(s)))
             .collect();
@@ -136,6 +142,14 @@ impl ApiAnalyzer {
             if let Some(pos) = dot_normalized[index..].find("com.sun.jna") {
                 let absolute_pos = index + pos;
                 let sub = &dot_normalized[absolute_pos..];
+                if crate::rules::SAFE_NATIVE_PACKAGES
+                    .iter()
+                    .any(|pkg| sub == *pkg || sub.starts_with(&format!("{}.", pkg)))
+                {
+                    index = absolute_pos + "com.sun.jna".len();
+                    continue;
+                }
+
                 let matches_safe = SAFE_NATIVE_CALLS.iter().any(|&safe| sub.starts_with(safe));
                 if !matches_safe {
                     return false;

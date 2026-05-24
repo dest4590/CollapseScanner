@@ -7,6 +7,8 @@ mod rules;
 mod scanner;
 mod types;
 mod utils;
+#[cfg(feature = "web-ui")]
+mod web;
 
 use {
     crate::{
@@ -61,6 +63,7 @@ struct ResolvedArgs {
     find: Vec<String>,
     threads: usize,
     config: Option<PathBuf>,
+    web: bool,
 }
 
 #[derive(Parser, Clone)]
@@ -118,6 +121,8 @@ struct Args {
         help = "Worker threads to use; 0 lets Rayon decide"
     )]
     threads: Option<usize>,
+    #[clap(long, action = clap::ArgAction::SetTrue, help = "Run simple web UI (drag-and-drop)")]
+    web: bool,
 }
 
 struct ProgressReporter {
@@ -148,11 +153,10 @@ impl ProgressReporter {
             let progress_bar = ProgressBar::new_spinner();
             let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {prefix}")
                 .expect("valid spinner template");
-            let bar_style = ProgressStyle::with_template(
-                "{prefix} [{wide_bar:.cyan/blue}] {pos}/{len}",
-            )
-            .expect("valid progress template")
-            .progress_chars("#-");
+            let bar_style =
+                ProgressStyle::with_template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len}")
+                    .expect("valid progress template")
+                    .progress_chars("#-");
 
             progress_bar.enable_steady_tick(Duration::from_millis(120));
 
@@ -172,7 +176,6 @@ impl ProgressReporter {
                     progress_bar.set_prefix("");
                 }
 
-                // Don't display file paths or verbose messages in the progress bar
                 progress_bar.set_message("".to_string());
 
                 if snapshot.finished {
@@ -259,6 +262,7 @@ fn resolve_cli_arguments(args: Args) -> Result<ResolvedArgs, Box<dyn std::error:
             .or_else(|| config.as_ref().and_then(|cfg| cfg.threads))
             .unwrap_or(0),
         config: args.config,
+        web: args.web,
     })
 }
 
@@ -505,6 +509,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scanner = CollapseScanner::new(options.clone())?;
     let path = validate_scan_path(&args)?;
+
+    if args.web {
+        #[cfg(feature = "web-ui")]
+        {
+            web::run_web_ui(scanner, options)?;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "web-ui"))]
+        {
+            eprintln!("web UI requested but binary built without `web-ui` feature");
+            std::process::exit(1);
+        }
+    }
 
     if !args.json {
         print_scan_info(&path, &args, &scanner);

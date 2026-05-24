@@ -1,0 +1,407 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>CollapseScanner – Upload</title>
+    <style>
+      :root {
+        --bg: #000;
+        --panel: #0b0b0b;
+        --muted: #bdbdbd;
+        --accent: #ffcc00;
+        --card-border: #222;
+        --badge-bg: #fff;
+        --badge-color: #000;
+      }
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          "Helvetica Neue",
+          Arial;
+        margin: 28px 36px;
+        background: var(--bg);
+        color: #fff;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+      }
+      h2 {
+        font-size: 22px;
+        margin: 10px 0 18px;
+      }
+      #drop {
+        border: 1px dashed #2b2b2b;
+        border-radius: 8px;
+        padding: 28px;
+        text-align: center;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.02),
+          transparent
+        );
+        width: 100%;
+        box-sizing: border-box;
+        transition:
+          box-shadow 0.18s ease,
+          transform 0.12s ease;
+      }
+      #drop.drag {
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+        transform: translateY(-2px);
+      }
+      input[type="file"] {
+        display: none;
+      }
+      .meta {
+        margin-top: 14px;
+        color: var(--muted);
+      }
+      .results {
+        margin-top: 22px;
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 1fr;
+      }
+      .file-card {
+        background: var(--panel);
+        border-radius: 6px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        border: 1px solid var(--card-border);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+        transition: transform 0.12s ease;
+      }
+      .file-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.7);
+      }
+      .score {
+        float: right;
+        font-weight: 800;
+        color: var(--accent);
+        background: rgba(255, 255, 255, 0.04);
+        padding: 6px 10px;
+        border-radius: 4px;
+      }
+      .finding {
+        padding: 6px 10px;
+        border-radius: 4px;
+        margin: 6px 6px 6px 0;
+        display: inline-block;
+        background: var(--badge-bg);
+        color: var(--badge-color);
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        border-left: 4px solid rgba(0, 0, 0, 0.08);
+      }
+      .finding:active {
+        transform: scale(0.99);
+      }
+      .file-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .file-path {
+        color: #fff;
+        font-weight: 700;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 78%;
+        display: inline-block;
+      }
+      .findings-wrap {
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .controls {
+        display: flex;
+        gap: 18px;
+        align-items: center;
+        margin-top: 12px;
+      }
+      .filter-input {
+        padding: 8px 10px;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        background: #060606;
+        color: #fff;
+        min-width: 220px;
+      }
+      button,
+      #choose {
+        background: transparent;
+        color: #fff;
+        border: 1px solid #333;
+        padding: 8px 12px;
+        cursor: pointer;
+        border-radius: 6px;
+      }
+      button:hover,
+      #choose:hover {
+        background: #111;
+      }
+      .small-muted {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      @media (max-width: 720px) {
+        .controls {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .filter-input {
+          min-width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>Drag & Drop a JAR/class/file or click to upload</h2>
+      <div id="drop">
+        Drop files here or click to select<br /><br /><button id="choose">
+          Choose files</button
+        ><input id="f" type="file" multiple />
+      </div>
+      <div class="controls">
+        <label
+          >Filter by finding type:
+          <input
+            id="typeFilter"
+            class="filter-input"
+            placeholder="e.g. Url, SuspiciousApi"
+        /></label>
+        <label
+          >Type:
+          <select id="typeSelect" class="filter-input">
+            <option value="all">All</option>
+            <option value="Url">Url</option>
+            <option value="SuspiciousApi">SuspiciousApi</option>
+            <option value="SuspiciousUrl">SuspiciousUrl</option>
+            <option value="SuspiciousKeyword">SuspiciousKeyword</option>
+            <option value="ProcessExecution">ProcessExecution</option>
+            <option value="Other">Other</option>
+          </select>
+        </label>
+        <label
+          >Sort by:
+          <select id="sortBy" class="filter-input">
+            <option value="score">Danger score (desc)</option>
+            <option value="name">File name (asc)</option>
+            <option value="type">Top finding type (asc)</option>
+          </select>
+        </label>
+        <label
+          >Min score:
+          <input
+            id="minScore"
+            type="number"
+            class="filter-input"
+            value="0"
+            min="0"
+            max="10"
+        /></label>
+      </div>
+      <div class="meta" id="meta">No uploads yet.</div>
+      <div class="results" id="results"></div>
+    </div>
+    <script>
+      const drop = document.getElementById("drop");
+      const fileInput = document.getElementById("f");
+      const choose = document.getElementById("choose");
+      const meta = document.getElementById("meta");
+      const results = document.getElementById("results");
+      const typeFilter = document.getElementById("typeFilter");
+      const typeSelect = document.getElementById("typeSelect");
+      const sortBy = document.getElementById("sortBy");
+      const minScore = document.getElementById("minScore");
+
+      choose.addEventListener("click", () => fileInput.click());
+      drop.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        drop.classList.add("drag");
+      });
+      drop.addEventListener("dragleave", (e) => {
+        e.preventDefault();
+        drop.classList.remove("drag");
+      });
+      drop.addEventListener("drop", (e) => {
+        e.preventDefault();
+        drop.classList.remove("drag");
+        handleFiles(e.dataTransfer.files);
+      });
+      fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
+
+      async function handleFiles(files) {
+        meta.textContent = "Uploading...";
+        results.innerHTML = "";
+        const form = new FormData();
+        for (const f of files) {
+          form.append("file", f);
+        }
+        const res = await fetch("/upload", { method: "POST", body: form });
+        const json = await res.json();
+        renderReports(json);
+      }
+
+      function renderReports(reports) {
+        meta.textContent = "";
+        let totalFiles = 0;
+        let totalFindings = 0;
+        const allFiles = [];
+        for (const rep of reports) {
+          const uploaded = document.createElement("div");
+          uploaded.innerHTML = `<strong title="${rep.uploaded_path}">${rep.uploaded_path}</strong> – findings: ${rep.total_findings || 0}`;
+          meta.appendChild(uploaded);
+          totalFiles += (rep.files || []).length;
+          totalFindings += rep.total_findings || 0;
+
+          if (rep.error) {
+            const err = document.createElement("div");
+            err.textContent = rep.error;
+            results.appendChild(err);
+            continue;
+          }
+
+          for (const f of rep.files) {
+            allFiles.push(
+              Object.assign({}, f, { uploaded_path: rep.uploaded_path }),
+            );
+            const card = document.createElement("div");
+            card.className = "file-card";
+            const header = document.createElement("div");
+            header.className = "file-header";
+            header.innerHTML = `<span class='file-path' title="${f.file_path}">${f.file_path}</span><span class='score'>${f.danger_score}</span>`;
+            card.appendChild(header);
+
+            const wrap = document.createElement("div");
+            wrap.className = "findings-wrap";
+            for (const fd of f.findings) {
+              const badge = document.createElement("span");
+              badge.className = "finding";
+              const txt = `${fd.type}: ${fd.value}`;
+              badge.textContent = txt;
+              badge.title = "Click to copy";
+              badge.addEventListener("click", () => {
+                navigator.clipboard && navigator.clipboard.writeText(txt);
+                const old = badge.textContent;
+                badge.textContent = "Copied";
+                setTimeout(() => (badge.textContent = old), 900);
+              });
+              wrap.appendChild(badge);
+            }
+            card.appendChild(wrap);
+
+            results.appendChild(card);
+          }
+        }
+
+        results.innerHTML = "";
+        const sorter = (a, b) => {
+          const by = sortBy.value || "score";
+          if (by === "score")
+            return (b.danger_score || 0) - (a.danger_score || 0);
+          if (by === "name")
+            return ("" + a.file_path).localeCompare(b.file_path);
+          if (by === "type")
+            return ((a.findings[0] && a.findings[0].type) || "").localeCompare(
+              (b.findings[0] && b.findings[0].type) || "",
+            );
+          return 0;
+        };
+        allFiles.sort(sorter);
+        for (const f of allFiles) {
+          const card = document.createElement("div");
+          card.className = "file-card";
+          const header = document.createElement("div");
+          header.className = "file-header";
+          header.innerHTML = `<span class='file-path' title="${f.file_path}">${f.file_path}</span><span class='score'>${f.danger_score}</span>`;
+          card.appendChild(header);
+          const wrap = document.createElement("div");
+          wrap.className = "findings-wrap";
+          for (const fd of f.findings) {
+            const badge = document.createElement("span");
+            badge.className = "finding";
+            const txt = `${fd.type}: ${fd.value}`;
+            badge.textContent = txt;
+            badge.title = "Click to copy";
+            badge.addEventListener("click", () => {
+              navigator.clipboard && navigator.clipboard.writeText(txt);
+              const old = badge.textContent;
+              badge.textContent = "Copied";
+              setTimeout(() => (badge.textContent = old), 900);
+            });
+            wrap.appendChild(badge);
+          }
+          card.appendChild(wrap);
+          const more = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.textContent = "Details";
+          more.appendChild(summary);
+          const pre = document.createElement("pre");
+          pre.style.margin = "8px 0 0";
+          pre.style.whiteSpace = "pre-wrap";
+          pre.style.fontSize = "13px";
+          const info = {
+            file_path: f.file_path,
+            danger_score: f.danger_score,
+            uploaded_path: f.uploaded_path,
+            findings: f.findings,
+          };
+          pre.textContent = JSON.stringify(info, null, 2);
+          more.appendChild(pre);
+          card.appendChild(more);
+          results.appendChild(card);
+        }
+
+        meta.insertAdjacentHTML(
+          "beforeend",
+          `<div class="small-muted">Files: ${totalFiles} · Findings: ${totalFindings}</div>`,
+        );
+        applyFilters();
+      }
+
+      function applyFilters() {
+        const type = typeFilter.value.trim().toLowerCase();
+        const typeExact =
+          typeSelect && typeSelect.value ? typeSelect.value : "all";
+        const min = parseInt(minScore.value) || 0;
+        const cards = document.querySelectorAll(".file-card");
+        cards.forEach((card) => {
+          const score = parseInt(card.querySelector(".score").textContent) || 0;
+          let matchesType = true;
+          if (type) {
+            matchesType = Array.from(card.querySelectorAll(".finding")).some(
+              (b) => b.textContent.toLowerCase().includes(type),
+            );
+          }
+          if (typeExact && typeExact !== "all") {
+            const want = typeExact.toLowerCase();
+            matchesType =
+              matchesType &&
+              Array.from(card.querySelectorAll(".finding")).some((b) =>
+                b.textContent.toLowerCase().startsWith(want),
+              );
+          }
+          card.style.display = score >= min && matchesType ? "block" : "none";
+        });
+      }
+
+      typeFilter.addEventListener("input", applyFilters);
+      typeSelect && typeSelect.addEventListener("change", applyFilters);
+      minScore.addEventListener("input", applyFilters);
+    </script>
+  </body>
+</html>

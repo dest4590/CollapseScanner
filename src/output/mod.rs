@@ -56,7 +56,7 @@ pub fn print_banner() {
     println!(
         "{}",
         format!(
-            "|{:>28}CollapseScanner v{}{:>30}|",
+            "|{:>28}CollapseScanner v{}{:>28}|",
             "",
             env!("CARGO_PKG_VERSION"),
             ""
