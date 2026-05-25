@@ -7,12 +7,11 @@ use std::time::Instant;
 
 use zip::ZipArchive;
 
-use crate::config::SYSTEM_CONFIG;
+use crate::errors::ScanError;
 use crate::rules::{
     EXECUTABLE_RESOURCE_EXTENSIONS, NATIVE_LIBRARY_EXTENSIONS, NESTED_ARCHIVE_EXTENSIONS,
     SCRIPT_RESOURCE_EXTENSIONS,
 };
-use crate::errors::ScanError;
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{FindingType, ProgressScope, ResourceInfo, ScanResult};
 
@@ -33,41 +32,53 @@ impl CollapseScanner {
         let total_files = archive.len();
         let mut skipped_count = 0;
 
-        if self.options.verbose {
-            println!("[*] Scanning JAR file: {}", jar_path.display());
-        }
-
-        let max_entry_size = SYSTEM_CONFIG.max_file_size * 1024 * 1024;
-
-        let processed_count = Arc::new(AtomicUsize::new(0));
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
-                if gp.scope != ProgressScope::Targets {
-                    gp.scope = ProgressScope::JarEntries;
-                    gp.total = total_files;
-                    gp.current = 0;
-                }
+                gp.message = format!("Indexing {}", jar_path.display());
+            }
+        }
+
+        let mut entries_to_process = Vec::new();
+        for i in 0..total_files {
+            let entry = match archive.by_index(i) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            let entry_name = match entry.enclosed_name() {
+                Some(p) => Self::get_archive_entry_name(&p.to_string_lossy()),
+                None => Self::get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
+            };
+
+            if !entry.is_dir() && self.should_scan(&entry_name) {
+                entries_to_process.push(i);
+            } else {
+                skipped_count += 1;
+            }
+        }
+
+        let total_to_scan = total_files;
+        let processed_count = Arc::new(AtomicUsize::new(0));
+        let queued_count = Arc::new(AtomicUsize::new(0));
+
+        if let Some(ref prog_arc) = self.options.progress {
+            if let Ok(mut gp) = prog_arc.lock() {
+                gp.scope = ProgressScope::JarEntries;
+                gp.total = total_to_scan;
+                gp.current = 0;
                 gp.message = format!("Scanning {}", jar_path.display());
             }
         }
 
-        let results_arc = Arc::new(Mutex::new(Vec::with_capacity(total_files)));
+        let results_arc = Arc::new(Mutex::new(Vec::with_capacity(total_to_scan)));
 
         rayon::scope(|scope| {
             let mut pending_entries = Vec::with_capacity(JAR_ENTRY_BATCH_SIZE);
 
-            for i in 0..total_files {
+            for i in entries_to_process {
                 let mut archive_file = match archive.by_index(i) {
                     Ok(f) => f,
-                    Err(e) => {
-                        eprintln!(
-                            "(!) Error accessing entry {} in {}: {}",
-                            i,
-                            jar_path.display(),
-                            e
-                        );
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
 
                 let original_entry_name = match archive_file.enclosed_name() {
@@ -77,27 +88,7 @@ impl CollapseScanner {
                     )),
                 };
 
-                if archive_file.is_dir() || !self.should_scan(&original_entry_name) {
-                    skipped_count += 1;
-                    continue;
-                }
-
                 let file_size = archive_file.size() as usize;
-                if file_size > max_entry_size {
-                    if let Some(result) = self
-                        .create_oversized_entry_result(&original_entry_name, archive_file.size())
-                    {
-                        results_arc.lock().unwrap().push(result);
-                    } else if self.options.verbose {
-                        eprintln!(
-                            "(!) Skipping oversized entry ({} bytes): {}",
-                            archive_file.size(),
-                            original_entry_name
-                        );
-                    }
-                    skipped_count += 1;
-                    continue;
-                }
 
                 let mut buffer = Vec::with_capacity(file_size);
                 if let Err(e) = archive_file.read_to_end(&mut buffer) {
@@ -105,11 +96,23 @@ impl CollapseScanner {
                         "(!) Error reading content of {}: {}",
                         original_entry_name, e
                     );
+                    processed_count.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
 
                 let compressed_size = archive_file.compressed_size();
+                let progress_entry_name = original_entry_name.clone();
                 pending_entries.push((original_entry_name, compressed_size, buffer));
+                let queued = queued_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+                if let Some(ref prog_arc) = self.options.progress {
+                    if let Ok(mut gp) = prog_arc.lock() {
+                        if gp.scope == ProgressScope::JarEntries {
+                            gp.current = queued.min(gp.total.max(1));
+                            gp.message = progress_entry_name;
+                        }
+                    }
+                }
 
                 if pending_entries.len() >= JAR_ENTRY_BATCH_SIZE {
                     let entries = std::mem::replace(
@@ -185,8 +188,8 @@ impl CollapseScanner {
                 if gp.scope == ProgressScope::JarEntries {
                     gp.current = gp.total;
                     gp.message = format!(
-                        "Finished processing {} entries",
-                        processed_count.load(Ordering::Relaxed)
+                        "Finished queuing {} entries",
+                        queued_count.load(Ordering::Relaxed)
                     );
                 }
             }
@@ -209,16 +212,17 @@ impl CollapseScanner {
             0,
         )?;
 
-        let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+        processed_count.fetch_add(1, Ordering::Relaxed);
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
                 if gp.cancelled {
                     gp.message = "Scan cancelled".to_string();
                     return Ok(Vec::new());
                 }
-                if gp.scope == ProgressScope::JarEntries {
-                    gp.current = count;
+                if gp.scope == ProgressScope::JarEntries || gp.total <= 1 {
                     gp.message = original_entry_name.to_string();
+                } else {
+                    gp.message = format!("{} (inside JAR)", original_entry_name);
                 }
             }
         }
@@ -280,7 +284,6 @@ impl CollapseScanner {
             Err(_) => return Ok(Vec::new()),
         };
 
-        let max_entry_size = SYSTEM_CONFIG.max_file_size * 1024 * 1024;
         let mut results = Vec::new();
 
         for index in 0..archive.len() {
@@ -310,14 +313,6 @@ impl CollapseScanner {
 
             let display_path = format!("{}!/{relative_name}", container_path);
             let file_size = archive_file.size() as usize;
-            if file_size > max_entry_size {
-                if let Some(result) =
-                    self.create_oversized_entry_result(&display_path, archive_file.size())
-                {
-                    results.push(result);
-                }
-                continue;
-            }
 
             let compressed_size = archive_file.compressed_size();
             let mut nested_buffer = Vec::with_capacity(file_size);
@@ -371,59 +366,6 @@ impl CollapseScanner {
         })
     }
 
-    fn create_oversized_entry_result(&self, entry_name: &str, size: u64) -> Option<ScanResult> {
-        let ends_with_ignore_case = |s: &str, suffix: &str| {
-            s.len() >= suffix.len() && a_ends_with_b_case_insensitive(s, suffix)
-        };
-        let is_class_candidate = ends_with_ignore_case(entry_name, ".class")
-            || ends_with_ignore_case(entry_name, ".class/");
-        let is_interesting_resource = is_class_candidate
-            || self.has_extension(entry_name, NESTED_ARCHIVE_EXTENSIONS)
-            || self.has_extension(entry_name, SCRIPT_RESOURCE_EXTENSIONS)
-            || self.has_extension(entry_name, EXECUTABLE_RESOURCE_EXTENSIONS)
-            || self.has_extension(entry_name, NATIVE_LIBRARY_EXTENSIONS);
-
-        if !is_interesting_resource {
-            return None;
-        }
-
-        let mut findings = vec![(
-            FindingType::SuspiciousArchiveEntry,
-            format!(
-                "Oversized entry was not fully inspected ({} bytes exceeds {} MB limit)",
-                size, SYSTEM_CONFIG.max_file_size
-            ),
-        )];
-
-        if self.has_extension(entry_name, NATIVE_LIBRARY_EXTENSIONS) {
-            findings.push((
-                FindingType::NativeLibrary,
-                format!("Oversized native library resource: {}", entry_name),
-            ));
-        }
-
-        self.normalize_findings(&mut findings);
-
-        let resource_info = ResourceInfo {
-            path: entry_name.to_string(),
-            size,
-            is_class_file: is_class_candidate,
-            is_dead_class_candidate: false,
-        };
-        let danger_score = self.calculate_danger_score(&findings, Some(&resource_info));
-        let danger_explanation =
-            self.generate_danger_explanation(danger_score, &findings, Some(&resource_info));
-
-        Some(ScanResult {
-            file_path: entry_name.to_string(),
-            matches: Arc::new(findings),
-            class_details: None,
-            resource_info: Some(resource_info),
-            danger_score,
-            danger_explanation,
-        })
-    }
-
     fn collect_resource_findings(
         &self,
         resource_name: &str,
@@ -434,14 +376,14 @@ impl CollapseScanner {
 
         if self.has_extension(resource_name, SCRIPT_RESOURCE_EXTENSIONS) {
             findings.push((
-                FindingType::SuspiciousArchiveEntry,
+                FindingType::ArchiveEntry,
                 format!("Embedded script resource: {}", resource_name),
             ));
         }
 
         if self.has_extension(resource_name, EXECUTABLE_RESOURCE_EXTENSIONS) {
             findings.push((
-                FindingType::SuspiciousArchiveEntry,
+                FindingType::ArchiveEntry,
                 format!("Embedded executable resource: {}", resource_name),
             ));
         }
@@ -457,7 +399,7 @@ impl CollapseScanner {
             let finding_type = if self.has_extension(resource_name, NATIVE_LIBRARY_EXTENSIONS) {
                 FindingType::NativeLibrary
             } else {
-                FindingType::SuspiciousArchiveEntry
+                FindingType::ArchiveEntry
             };
 
             findings.push((
@@ -480,7 +422,7 @@ impl CollapseScanner {
                 && ratio >= HIGH_COMPRESSION_RATIO_THRESHOLD
             {
                 findings.push((
-                    FindingType::SuspiciousArchiveEntry,
+                    FindingType::ArchiveEntry,
                     format!(
                         "Highly compressed resource ({ratio:.1}x ratio): {}",
                         resource_name
@@ -516,7 +458,7 @@ impl CollapseScanner {
 
         if !matched_headers.is_empty() {
             findings.push((
-                FindingType::SuspiciousArchiveEntry,
+                FindingType::ArchiveEntry,
                 format!(
                     "Manifest requests instrumentation or elevated permissions ({}) in {}",
                     matched_headers.join(", "),
@@ -584,8 +526,4 @@ impl CollapseScanner {
             is_dead_class_candidate,
         })
     }
-}
-
-fn a_ends_with_b_case_insensitive(a: &str, b: &str) -> bool {
-    a.len() >= b.len() && a[a.len() - b.len()..].eq_ignore_ascii_case(b)
 }

@@ -6,9 +6,8 @@ use std::path::Path;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::config::SYSTEM_CONFIG;
-use crate::rules::{CLASS_EXTS, JAR_CLASS_EXTS, JAR_EXTS};
 use crate::errors::ScanError;
+use crate::rules::{CLASS_EXTS, JAR_CLASS_EXTS, JAR_EXTS};
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{ProgressScope, ScanResult};
 
@@ -89,29 +88,10 @@ impl CollapseScanner {
             return self.scan_directory(path);
         }
 
-        if let Ok(metadata) = fs::metadata(path) {
-            let file_size_mb = metadata.len() / (1024 * 1024);
-            if file_size_mb > SYSTEM_CONFIG.max_file_size as u64 {
-                if self.options.verbose {
-                    println!(
-                        "(!) Skipping file larger than {} MB: {}",
-                        SYSTEM_CONFIG.max_file_size,
-                        path.display()
-                    );
-                }
-                return Ok(Vec::new());
-            }
-        }
-
         if has_extension(path, JAR_EXTS) {
             if let Some(progress) = &self.options.progress {
                 if let Ok(mut state) = progress.lock() {
-                    if state.scope != ProgressScope::Targets {
-                        state.scope = ProgressScope::JarEntries;
-                        state.current = 0;
-                        state.total = 0;
-                        state.message = format!("Opening {}", path.display());
-                    }
+                    state.message = format!("Opening {}", path.display());
                 }
             }
             self.scan_jar_file(path)

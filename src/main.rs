@@ -131,7 +131,7 @@ struct ProgressReporter {
 }
 
 impl ProgressReporter {
-    fn start(enabled: bool) -> Self {
+    fn new(enabled: bool) -> Self {
         if !enabled {
             return Self {
                 shared: None,
@@ -139,27 +139,45 @@ impl ProgressReporter {
             };
         }
 
-        let shared = Arc::new(Mutex::new(Progress {
-            current: 0,
-            total: 0,
-            message: "Preparing scan".to_string(),
-            cancelled: false,
-            finished: false,
-            scope: ProgressScope::Preparing,
-        }));
+        Self {
+            shared: Some(Arc::new(Mutex::new(Progress {
+                current: 0,
+                total: 0,
+                message: String::new(),
+                cancelled: false,
+                finished: false,
+                scope: ProgressScope::Preparing,
+            }))),
+            render_handle: None,
+        }
+    }
 
-        let render_state = Arc::clone(&shared);
+    fn start(&mut self) {
+        let render_state = match &self.shared {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        if self.render_handle.is_some() {
+            return;
+        }
+
         let render_handle = thread::spawn(move || {
             let mut progress_bar = ProgressBar::new_spinner();
             let mut is_bar = false;
-            let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {prefix} {msg}")
-                .expect("valid spinner template");
-            let bar_style =
-                ProgressStyle::with_template("{prefix} [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")
-                    .expect("valid progress template")
-                    .progress_chars("#-");
 
-            progress_bar.enable_steady_tick(Duration::from_millis(120));
+            let spinner_style = ProgressStyle::with_template(
+                "{spinner:.cyan.bold} {prefix:.white.bold} › {msg:.white}",
+            )
+            .expect("valid spinner template");
+
+            let bar_style = ProgressStyle::with_template(
+                "{spinner:.cyan.bold} {prefix:.white.bold} {pos}/{len} [{wide_bar:.cyan}] {percent}%",
+            )
+            .expect("valid progress template")
+            .progress_chars("■□");
+
+            progress_bar.enable_steady_tick(Duration::from_millis(100));
 
             loop {
                 let snapshot = match render_state.lock() {
@@ -167,7 +185,7 @@ impl ProgressReporter {
                     Err(_) => break,
                 };
 
-                let prefix = snapshot.scope.label().to_string();
+                let prefix = snapshot.scope.label();
                 let message = snapshot.message.clone();
 
                 if snapshot.total > 0 {
@@ -175,17 +193,17 @@ impl ProgressReporter {
                         progress_bar.finish_and_clear();
                         progress_bar = ProgressBar::new(snapshot.total as u64);
                         is_bar = true;
+                        progress_bar.enable_steady_tick(Duration::from_millis(100));
                     }
 
                     progress_bar.set_style(bar_style.clone());
-                    progress_bar.set_length(snapshot.total as u64);
                     progress_bar.set_position(snapshot.current.min(snapshot.total) as u64);
                 } else {
                     if is_bar {
                         progress_bar.finish_and_clear();
                         progress_bar = ProgressBar::new_spinner();
                         is_bar = false;
-                        progress_bar.enable_steady_tick(Duration::from_millis(120));
+                        progress_bar.enable_steady_tick(Duration::from_millis(100));
                     }
                     progress_bar.set_style(spinner_style.clone());
                 }
@@ -198,14 +216,11 @@ impl ProgressReporter {
                     break;
                 }
 
-                thread::sleep(Duration::from_millis(80));
+                thread::sleep(Duration::from_millis(50));
             }
         });
 
-        Self {
-            shared: Some(shared),
-            render_handle: Some(render_handle),
-        }
+        self.render_handle = Some(render_handle);
     }
 
     fn shared_state(&self) -> Option<Arc<Mutex<Progress>>> {
@@ -515,7 +530,7 @@ fn render_text_report(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = resolve_cli_arguments(Args::parse())?;
-    let progress_reporter = ProgressReporter::start(should_show_progress_bar(&args));
+    let mut progress_reporter = ProgressReporter::new(should_show_progress_bar(&args));
     let options = build_scanner_options(&args, progress_reporter.shared_state());
 
     if !args.json {
@@ -548,6 +563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    progress_reporter.start();
     let scan_start_time = std::time::Instant::now();
 
     match scanner.scan_path(&path) {

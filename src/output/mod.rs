@@ -43,7 +43,7 @@ pub fn format_scan_stats(duration: Duration, total_files: usize) -> (f64, f64) {
 
 pub fn print_section_header(title: &str) {
     println!("\n{}", title.bright_cyan().bold());
-    println!("{}", "─".repeat(70).bright_black());
+    println!("{}", "─".repeat(70).bright_white());
 }
 
 pub fn print_banner() {
@@ -83,38 +83,57 @@ pub fn print_scan_config(
     ignore_keywords_file: &Option<std::path::PathBuf>,
     verbose: bool,
 ) {
-    println!("\n{}", "Scan setup".bright_white().bold());
-    println!("  Target: {}", path.display().to_string().bright_white());
+    println!("\n  {}", "SCAN SETUP".bright_white().bold());
     println!(
-        "  Mode: {} ({})",
-        mode_label.bright_white(),
-        mode_description.dimmed()
+        "  {} {}",
+        "Target:".bright_white(),
+        path.display().to_string().bright_white()
+    );
+    println!(
+        "  {} {} {}",
+        "Mode:  ".bright_white(),
+        mode_label.bright_cyan(),
+        format!("({})", mode_description).bright_white()
     );
 
     if let Some(config_path) = config_path {
-        println!("  Config : {}", config_path.display().to_string().dimmed());
+        println!(
+            "  {} {}",
+            "Config:".bright_white(),
+            config_path.display().to_string().bright_white()
+        );
     }
 
     if !exclude_patterns.is_empty() {
-        println!("  Exclude:");
-        for pattern in exclude_patterns {
-            println!("    - {}", pattern.dimmed());
-        }
+        println!(
+            "  {} {}",
+            "Exclude:".bright_white(),
+            exclude_patterns.join(", ").bright_white()
+        );
     }
 
     if !find_patterns.is_empty() {
-        println!("  Match only:");
-        for pattern in find_patterns {
-            println!("    - {}", pattern.dimmed());
-        }
+        println!(
+            "  {} {}",
+            "Match:  ".bright_white(),
+            find_patterns.join(", ").bright_white()
+        );
     }
 
     if let Some(p) = ignore_keywords_file {
-        println!("  Ignore : {}", p.display().to_string().dimmed());
+        println!(
+            "  {} {}",
+            "Ignore: ".bright_white(),
+            p.display().to_string().bright_white()
+        );
     }
 
     if verbose {
-        println!("  Verbose: {}", "enabled".bright_white());
+        println!(
+            "  {} {}",
+            "Level: ".bright_white(),
+            "Verbose".bright_yellow()
+        );
     }
 }
 
@@ -204,41 +223,28 @@ pub fn print_detailed_file_report(results: &[&ScanResult]) {
 
     sorted.sort_by(|a, b| b.danger_score.cmp(&a.danger_score));
 
-    print_section_header("ALL FINDINGS");
+    print_section_header("FINDINGS BY FILE");
 
     for result in sorted {
-        let risk_label_str = match result.danger_score {
-            s if s >= 8 => "CRITICAL",
-            s if s >= 5 => "HIGH",
-            s if s >= 3 => "MEDIUM",
-            _ => "LOW",
+        let risk_label = match result.danger_score {
+            8..=10 => "SEVERE".on_red().white().bold(),
+            5..=7 => "DANGER".red().bold(),
+            3..=4 => "SUSPICIOUS".yellow().bold(),
+            _ => "LOW".green().bold(),
         };
 
-        let risk_color = match result.danger_score {
-            s if s >= 8 => "red",
-            s if s >= 5 => "bright_red",
-            s if s >= 3 => "yellow",
-            _ => "green",
-        };
-
-        let mut jar_summary = format!(
-            "{} · CVSS {:.1} · {} finding{}",
-            risk_label_str,
-            result.danger_score as f64 / 10.0,
-            result.matches.len(),
-            if result.matches.len() == 1 { "" } else { "s" }
-        );
-
-        if let Some(ri) = &result.resource_info {
-            if ri.is_dead_class_candidate {
-                jar_summary.push_str(" · dead code");
-            }
-        }
+        let cvss_score = format!("({:.1})", result.danger_score as f64 / 10.0).bright_white();
 
         println!(
-            "  {}  {}",
+            "  {} {} {}",
+            "◆".bright_cyan(),
             result.file_path.bright_white().bold(),
-            jar_summary.color(risk_color).bold()
+            cvss_score
+        );
+        println!(
+            "    {} · {} findings",
+            risk_label,
+            result.matches.len().to_string().bright_white()
         );
 
         let mut grouped: HashMap<FindingType, Vec<String>> = HashMap::new();
@@ -246,39 +252,42 @@ pub fn print_detailed_file_report(results: &[&ScanResult]) {
             grouped.entry(*ft).or_default().push(value.clone());
         }
 
-        for ft in &[
+        let order = [
             FindingType::DiscordWebhook,
             FindingType::TamperedClass,
             FindingType::SuspiciousUrl,
-            FindingType::SuspiciousApi,
+            FindingType::JavaAPI,
             FindingType::CredentialSecret,
             FindingType::EncodedPayload,
             FindingType::IpAddress,
             FindingType::SuspiciousKeyword,
             FindingType::Url,
             FindingType::NativeLibrary,
-            FindingType::SuspiciousArchiveEntry,
+            FindingType::ArchiveEntry,
             FindingType::IpV6Address,
             FindingType::ObfuscationUnicode,
-        ] {
+        ];
+
+        for ft in &order {
             if let Some(values) = grouped.get(ft) {
-                let (icon, color) = ft.with_symbol();
+                let (_icon, color) = ft.with_symbol();
+
                 if values.len() == 1 {
                     println!(
-                        "    {} {}: {}",
-                        icon.color(color).bold(),
+                        "    {:>12} {} {}",
                         ft.to_string().color(color).bold(),
-                        values[0]
+                        "→".bright_white(),
+                        values[0].bright_white()
                     );
                 } else {
                     println!(
-                        "    {} {} ({})",
-                        icon.color(color).bold(),
+                        "    {:>12} {} {} items",
                         ft.to_string().color(color).bold(),
-                        values.len()
+                        "↴".bright_white(),
+                        values.len().to_string().bright_white()
                     );
                     for value in values {
-                        println!("      - {}", value);
+                        println!("                 {} {}", "•".bright_white(), value);
                     }
                 }
             }
@@ -310,14 +319,6 @@ pub fn print_severity_matrix(results: &[&ScanResult]) {
 
     print_section_header("SEVERITY DISTRIBUTION");
 
-    println!(
-        "  {} CRITICAL │ {} HIGH │ {} MEDIUM │ {} LOW",
-        format!("{:>2}", critical).bright_red().bold(),
-        format!("{:>2}", high).red().bold(),
-        format!("{:>2}", medium).yellow().bold(),
-        format!("{:>2}", low).green().bold()
-    );
-
     let bar_width = 50;
     let crit_pct = (critical as f64 / total as f64 * bar_width as f64) as usize;
     let high_pct = (high as f64 / total as f64 * bar_width as f64) as usize;
@@ -325,16 +326,27 @@ pub fn print_severity_matrix(results: &[&ScanResult]) {
     let low_pct = bar_width - crit_pct - high_pct - med_pct;
 
     print!("  ");
-    print!("{}", "█".repeat(crit_pct).red());
-    print!("{}", "█".repeat(high_pct).bright_red());
-    print!("{}", "█".repeat(med_pct).yellow());
-    print!("{}", "█".repeat(low_pct).green());
-    println!();
+    print!("{}", "■".repeat(crit_pct).red());
+    print!("{}", "■".repeat(high_pct).bright_red());
+    print!("{}", "■".repeat(med_pct).yellow());
+    print!("{}", "■".repeat(low_pct).green());
+    println!("  {}", total.to_string().bright_white());
+
+    println!(
+        "  {} {}     {} {}     {} {}     {} {}",
+        "●".red(),
+        "Critical".bright_white(),
+        "●".bright_red(),
+        "High".bright_white(),
+        "●".yellow(),
+        "Medium".bright_white(),
+        "●".green(),
+        "Low".bright_white()
+    );
 }
 
 pub fn print_finding_statistics(results: &[&ScanResult]) {
-    println!("\n{}", "FINDING TYPES".bright_cyan().bold());
-    println!("{}", "─".repeat(70).bright_black());
+    print_section_header("FINDING TYPES SUMMARY");
 
     let mut type_stats: HashMap<FindingType, usize> = HashMap::new();
 
@@ -348,12 +360,11 @@ pub fn print_finding_statistics(results: &[&ScanResult]) {
     sorted.sort_by_key(|(_ft, count)| std::cmp::Reverse(**count));
 
     for (ft, count) in sorted.iter() {
-        let (icon, color) = ft.with_symbol();
+        let (_icon, color) = ft.with_symbol();
         println!(
-            "  {} {} {}",
-            icon.color(color).bold(),
-            ft.to_string().color(color),
-            format!("x{}", count).bright_white()
+            "  {}: {}",
+            ft.to_string().color(color).bold(),
+            count.to_string().bright_white().bold()
         );
     }
 }

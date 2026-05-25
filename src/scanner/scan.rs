@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::config::SYSTEM_CONFIG;
-use crate::rules::{SUSSY_DOMAINS, GOOD_LINKS};
 use crate::errors::ScanError;
+use crate::rules::{GOOD_LINKS, SUSPICIOUS_DOMAINS};
 use crate::types::ScannerOptions;
 
 type ResultCache = Arc<RwLock<HashMap<u64, Arc<Vec<(crate::types::FindingType, String)>>>>>;
@@ -56,7 +56,7 @@ impl CollapseScanner {
 
         Ok(CollapseScanner {
             good_links,
-            suspicious_domains: (*SUSSY_DOMAINS).clone(),
+            suspicious_domains: (*SUSPICIOUS_DOMAINS).clone(),
             ignored_suspicious_keywords,
             options,
             found_custom_jvm_indicator: Arc::new(std::sync::Mutex::new(false)),

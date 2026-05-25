@@ -13,7 +13,6 @@ pub struct SystemConfig {
     pub result_cache_size: usize,
     pub buffer_size: usize,
     pub safe_string_cache_capacity: usize,
-    pub max_file_size: usize,
 }
 
 fn parse_env_usize(key: &str) -> Option<usize> {
@@ -57,18 +56,10 @@ impl SystemConfig {
                 _ => 2_000_000,
             });
 
-        let max_file_size = match available_memory {
-            m if m < LOW_MEMORY_THRESHOLD => 100,
-            m if m < MEDIUM_MEMORY_THRESHOLD => 250,
-            m if m < HIGH_MEMORY_THRESHOLD => 500,
-            _ => 1000,
-        };
-
         SystemConfig {
             result_cache_size,
             buffer_size,
             safe_string_cache_capacity,
-            max_file_size,
         }
     }
 
@@ -86,7 +77,6 @@ impl SystemConfig {
             "   [s] String Cache Capacity: {} entries",
             self.safe_string_cache_capacity
         );
-        println!("   [f] Max File Size: {} MB", self.max_file_size);
 
         println!("   [i] You can override these settings with environment variables:");
         println!("       COLLAPSE_RESULT_CACHE_SIZE (usize)");

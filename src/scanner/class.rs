@@ -210,7 +210,7 @@ impl CollapseScanner {
         for (pattern, desc) in reflective_patterns {
             if pattern.is_match(string) {
                 findings.push((
-                    FindingType::SuspiciousApi,
+                    FindingType::JavaAPI,
                     format!("{}: {}", desc, truncate_string(string, 60)),
                 ));
             }
@@ -596,7 +596,7 @@ impl CollapseScanner {
             || type_counts.contains_key(&FindingType::SuspiciousUrl);
 
         let has_suspicious_logic = type_counts.contains_key(&FindingType::SuspiciousKeyword)
-            || type_counts.contains_key(&FindingType::SuspiciousApi)
+            || type_counts.contains_key(&FindingType::JavaAPI)
             || type_counts.contains_key(&FindingType::CredentialSecret);
 
         let has_obfuscation = type_counts.contains_key(&FindingType::EncodedPayload)
@@ -636,31 +636,7 @@ impl CollapseScanner {
         }
 
         let mut explanations = Vec::new();
-
-        let warn_prefix = "(!) ";
-        let ok_prefix = "[+] ";
-
-        if score >= 8 {
-            explanations.push(format!(
-                "{}CRITICAL RISK: Multiple high-confidence malicious indicators detected!",
-                warn_prefix
-            ));
-        } else if score >= 5 {
-            explanations.push(format!(
-                "{}MODERATE TO HIGH RISK: Several suspicious elements found in combination.",
-                warn_prefix
-            ));
-        } else if score >= 3 {
-            explanations.push(format!(
-                "{}LOW TO MEDIUM RISK: Some suspicious elements detected, but evidence is isolated.",
-                warn_prefix
-            ));
-        } else {
-            explanations.push(format!(
-                "{}MINIMAL RISK: No strong evidence of malicious behavior detected.",
-                ok_prefix
-            ));
-        }
+        explanations.push(self.get_severity_prefix(score));
 
         let mut by_type: HashMap<FindingType, Vec<String>> = HashMap::new();
         for (finding_type, value) in findings {
@@ -670,129 +646,161 @@ impl CollapseScanner {
                 .push(value.clone());
         }
 
-        if let Some(webhooks) = by_type.get(&FindingType::DiscordWebhook) {
-            if !webhooks.is_empty() {
-                explanations.push(format!(
-                    "CRITICAL: Found {} Discord webhook(s)! These are extremely dangerous and commonly used for data exfiltration, logging stolen information.",
-                    webhooks.len()
-                ));
-            }
-        }
+        self.add_finding_explanations(&mut explanations, &by_type);
 
-        if let Some(urls) = by_type.get(&FindingType::SuspiciousUrl) {
-            if !urls.is_empty() {
-                explanations.push(format!(
-                    "Found {} suspicious URL(s) that may be used for data exfiltration.",
-                    urls.len()
-                ));
-            }
-        }
-
-        if let Some(ips) = by_type.get(&FindingType::IpAddress) {
-            if !ips.is_empty() {
-                let sample = ips[0].clone();
-                explanations.push(format!(
-                    "Contains {} hardcoded IP address(es) such as {} that may indicate communication with malicious servers.",
-                    ips.len(), sample
-                ));
-            }
-        }
-
-        if let Some(urls) = by_type.get(&FindingType::Url) {
-            if !urls.is_empty() {
-                let domains: Vec<String> = urls
-                    .iter()
-                    .map(|url| extract_domain(url))
-                    .filter(|domain| !domain.is_empty() && !self.is_good_link(domain))
-                    .collect();
-
-                if !domains.is_empty() {
-                    let unique_domains: HashSet<String> = domains.into_iter().collect();
-                    let domain_list = unique_domains
-                        .into_iter()
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-
-                    explanations.push(format!(
-                        "Contains connections to {} potentially suspicious domain(s) including: {}{}",
-                        urls.len(),
-                        domain_list,
-                        if urls.len() > 3 { " and others..." } else { "" }
-                    ));
-                }
-            }
-        }
-
-        if let Some(keywords) = by_type.get(&FindingType::SuspiciousKeyword) {
-            if !keywords.is_empty() {
-                explanations.push(format!(
-                    "Contains {} suspicious code pattern(s) that may indicate malicious behavior.",
-                    keywords.len()
-                ));
-            }
-        }
-
-        if let Some(api_markers) = by_type.get(&FindingType::SuspiciousApi) {
-            if !api_markers.is_empty() {
-                explanations.push(format!(
-                    "Uses {} high-risk Java API marker(s) related to command execution, class loading, or instrumentation.",
-                    api_markers.len()
-                ));
-            }
-        }
-
-        if let Some(secrets) = by_type.get(&FindingType::CredentialSecret) {
-            if !secrets.is_empty() {
-                explanations.push(format!(
-                    "Contains {} embedded credential/token-like value(s). Hardcoded secrets are high confidence indicators for account theft or bot control.",
-                    secrets.len()
-                ));
-            }
-        }
-
-        if let Some(encoded_payloads) = by_type.get(&FindingType::EncodedPayload) {
-            if !encoded_payloads.is_empty() {
-                explanations.push(format!(
-                    "Contains {} high-entropy encoded blob(s) that may hide payloads, encrypted configuration, or staged code.",
-                    encoded_payloads.len()
-                ));
-            }
-        }
-
-        if let Some(tampered_classes) = by_type.get(&FindingType::TamperedClass) {
-            if !tampered_classes.is_empty() {
+        if let Some(ri) = resource_info {
+            if ri.is_dead_class_candidate {
                 explanations.push(
-                    "Contains malformed or non-standard class magic bytes. This is commonly used to evade static scanners and rely on a custom ClassLoader.".to_string()
+                    "Contains custom JVM bytecode (0xDEAD) which may indicate use of a custom classloader, reverse the jvm.dll.".to_string()
                 );
             }
         }
 
-        if let Some(native_libraries) = by_type.get(&FindingType::NativeLibrary) {
-            if !native_libraries.is_empty() {
-                explanations.push(format!(
-                    "Bundles {} native library resource(s).",
-                    native_libraries.len()
-                ));
-            }
-        }
-
-        if let Some(archive_entries) = by_type.get(&FindingType::SuspiciousArchiveEntry) {
-            if !archive_entries.is_empty() {
-                explanations.push(format!(
-                    "Contains {} suspicious embedded resource(s) such as scripts, executables, or heavily packed files.",
-                    archive_entries.len()
-                ));
-            }
-        }
-
-        if resource_info.is_some_and(|ri| ri.is_dead_class_candidate) {
-            explanations.push(
-                "Contains custom JVM bytecode (0xDEAD) which may indicate use of a custom classloader, reverse the jvm.dll.".to_string()
-            );
-        }
-
         explanations
+    }
+
+    fn get_severity_prefix(&self, score: u8) -> String {
+        let (prefix, msg) = match score {
+            8..=10 => (
+                "(!) ",
+                "CRITICAL RISK: Multiple high-confidence malicious indicators detected!",
+            ),
+            5..=7 => (
+                "(!) ",
+                "MODERATE TO HIGH RISK: Several suspicious elements found in combination.",
+            ),
+            3..=4 => (
+                "(!) ",
+                "LOW TO MEDIUM RISK: Some suspicious elements detected, but evidence is isolated.",
+            ),
+            _ => (
+                "[+] ",
+                "MINIMAL RISK: No strong evidence of malicious behavior detected.",
+            ),
+        };
+        format!("{}{}", prefix, msg)
+    }
+
+    fn add_finding_explanations(
+        &self,
+        explanations: &mut Vec<String>,
+        by_type: &HashMap<FindingType, Vec<String>>,
+    ) {
+        if let Some(webhooks) = by_type.get(&FindingType::DiscordWebhook) {
+            explanations.push(format!(
+                "CRITICAL: Found {} Discord webhook(s)! These are extremely dangerous and commonly used for data exfiltration.",
+                webhooks.len()
+            ));
+        }
+
+        if let Some(urls) = by_type.get(&FindingType::SuspiciousUrl) {
+            explanations.push(format!(
+                "Found {} suspicious URL(s) that may be used for data exfiltration.",
+                urls.len()
+            ));
+        }
+
+        if let Some(ips) = by_type.get(&FindingType::IpAddress) {
+            let sample = &ips[0];
+            explanations.push(format!(
+                "Contains {} hardcoded IP address(es) such as {} that may indicate communication with malicious servers.",
+                ips.len(), sample
+            ));
+        }
+
+        if let Some(urls) = by_type.get(&FindingType::Url) {
+            self.add_domain_explanations(explanations, urls);
+        }
+
+        if let Some(keywords) = by_type.get(&FindingType::SuspiciousKeyword) {
+            explanations.push(format!(
+                "Contains {} suspicious code pattern(s) that may indicate malicious behavior.",
+                keywords.len()
+            ));
+        }
+
+        if let Some(api_markers) = by_type.get(&FindingType::JavaAPI) {
+            explanations.push(format!(
+                "Uses {} high-risk Java API marker(s) related to command execution, class loading, or instrumentation.",
+                api_markers.len()
+            ));
+        }
+
+        if let Some(secrets) = by_type.get(&FindingType::CredentialSecret) {
+            explanations.push(format!(
+                "Contains {} embedded credential/token-like value(s). Hardcoded secrets are high confidence indicators for account theft.",
+                secrets.len()
+            ));
+        }
+
+        if let Some(native) = by_type.get(&FindingType::NativeLibrary) {
+            explanations.push(format!(
+                "Bundles {} native library resource(s).",
+                native.len()
+            ));
+        }
+
+        if let Some(encoded) = by_type.get(&FindingType::EncodedPayload) {
+            explanations.push(format!(
+                "Contains {} high-entropy encoded blob(s) that may hide payloads, encrypted configuration, or staged code.",
+                encoded.len()
+            ));
+        }
+
+        if let Some(tampered) = by_type.get(&FindingType::TamperedClass) {
+            explanations.push(format!(
+                "Found {} evidence of class tampering or invalid class structures, often used to confuse decompilers.",
+                tampered.len()
+            ));
+        }
+
+        if let Some(entries) = by_type.get(&FindingType::ArchiveEntry) {
+            explanations.push(format!(
+                "Contains {} suspicious embedded resource(s) such as scripts, executables, or heavily packed files.",
+                entries.len()
+            ));
+        }
+
+        if let Some(obf) = by_type.get(&FindingType::ObfuscationUnicode) {
+            explanations.push(format!(
+                "Contains {} instance(s) of Unicode-based name obfuscation.",
+                obf.len()
+            ));
+        }
+    }
+
+    fn add_domain_explanations(&self, explanations: &mut Vec<String>, urls: &[String]) {
+        let domains: Vec<String> = urls
+            .iter()
+            .map(|url| extract_domain(url))
+            .filter(|domain| !domain.is_empty() && !self.is_good_link(domain))
+            .collect();
+
+        if !domains.is_empty() {
+            let mut unique_domains: Vec<String> = domains
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            unique_domains.sort();
+            let domain_list = unique_domains
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            explanations.push(format!(
+                "Contains connections to {} potentially suspicious domain(s) including: {}{}",
+                urls.len(),
+                domain_list,
+                if unique_domains.len() > 3 {
+                    " and others..."
+                } else {
+                    ""
+                }
+            ));
+        }
     }
 
     fn build_scan_result(

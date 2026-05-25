@@ -53,9 +53,9 @@ pub enum ProgressScope {
 impl ProgressScope {
     pub fn label(self) -> &'static str {
         match self {
-            ProgressScope::Preparing => "scan",
-            ProgressScope::Targets => "files",
-            ProgressScope::JarEntries => "entries",
+            ProgressScope::Preparing => "Setup",
+            ProgressScope::Targets => "Files",
+            ProgressScope::JarEntries => "Items",
         }
     }
 }
@@ -68,12 +68,12 @@ pub enum FindingType {
     SuspiciousUrl,
     DiscordWebhook,
     SuspiciousKeyword,
-    SuspiciousApi,
+    JavaAPI,
     CredentialSecret,
     EncodedPayload,
     TamperedClass,
     NativeLibrary,
-    SuspiciousArchiveEntry,
+    ArchiveEntry,
     ObfuscationUnicode,
 }
 
@@ -83,16 +83,16 @@ impl std::fmt::Display for FindingType {
             FindingType::IpAddress => "IPv4 Address",
             FindingType::IpV6Address => "IPv6 Address",
             FindingType::Url => "URL",
-            FindingType::SuspiciousUrl => "Suspicious URL",
+            FindingType::SuspiciousUrl => "Network URL",
             FindingType::DiscordWebhook => "Discord Webhook",
-            FindingType::SuspiciousKeyword => "Suspicious Keyword",
-            FindingType::SuspiciousApi => "Suspicious Java API",
+            FindingType::SuspiciousKeyword => "Sensitive Keyword",
+            FindingType::JavaAPI => "Java API",
             FindingType::CredentialSecret => "Credential or Token",
             FindingType::EncodedPayload => "Encoded Payload",
             FindingType::TamperedClass => "Tampered Class",
             FindingType::NativeLibrary => "Native Library",
-            FindingType::SuspiciousArchiveEntry => "Suspicious Archive Entry",
-            FindingType::ObfuscationUnicode => "Obfuscation (Unicode Name)",
+            FindingType::ArchiveEntry => "Archive Entry",
+            FindingType::ObfuscationUnicode => "Unicode Obfuscation",
         };
         f.write_str(label)
     }
@@ -106,12 +106,12 @@ impl FindingType {
             FindingType::SuspiciousUrl => ("[NET]", "yellow"),
             FindingType::DiscordWebhook => ("[WEBHOOK]", "red"),
             FindingType::SuspiciousKeyword => ("[CODE]", "red"),
-            FindingType::SuspiciousApi => ("[API]", "yellow"),
+            FindingType::JavaAPI => ("[API]", "yellow"),
             FindingType::CredentialSecret => ("[SECRET]", "red"),
             FindingType::EncodedPayload => ("[BLOB]", "magenta"),
             FindingType::TamperedClass => ("[CLASS]", "red"),
             FindingType::NativeLibrary => ("[NATIVE]", "yellow"),
-            FindingType::SuspiciousArchiveEntry => ("[ENTRY]", "yellow"),
+            FindingType::ArchiveEntry => ("[ENTRY]", "yellow"),
             FindingType::ObfuscationUnicode => ("[OBF]", "magenta"),
         }
     }
@@ -123,12 +123,12 @@ impl FindingType {
             FindingType::SuspiciousUrl => 5,
             FindingType::DiscordWebhook => 10,
             FindingType::SuspiciousKeyword => 3,
-            FindingType::SuspiciousApi => 3,
+            FindingType::JavaAPI => 3,
             FindingType::CredentialSecret => 8,
             FindingType::EncodedPayload => 2,
             FindingType::TamperedClass => 6,
             FindingType::NativeLibrary => 4,
-            FindingType::SuspiciousArchiveEntry => 4,
+            FindingType::ArchiveEntry => 4,
             FindingType::ObfuscationUnicode => 1,
         }
     }
@@ -140,12 +140,12 @@ impl FindingType {
             FindingType::SuspiciousUrl => 8,
             FindingType::DiscordWebhook => 10,
             FindingType::SuspiciousKeyword => 6,
-            FindingType::SuspiciousApi => 7,
+            FindingType::JavaAPI => 7,
             FindingType::CredentialSecret => 10,
             FindingType::EncodedPayload => 5,
             FindingType::TamperedClass => 10,
             FindingType::NativeLibrary => 7,
-            FindingType::SuspiciousArchiveEntry => 8,
+            FindingType::ArchiveEntry => 8,
             FindingType::ObfuscationUnicode => 3,
         }
     }

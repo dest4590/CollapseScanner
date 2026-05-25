@@ -21,7 +21,7 @@ pub const NATIVE_LIBRARY_EXTENSIONS: &[&str] = &["dll", "so", "dylib", "jnilib"]
 // Suspicious Domains and Hosts
 // ============================================================================
 
-pub static SUSSY_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
+pub static SUSPICIOUS_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
     [
         "discord.com",
         "discordapp.com",
@@ -84,11 +84,10 @@ pub static IP_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap()
 });
 
-pub static IPV6_REGEX: Lazy<Regex> =
-    Lazy::new(|| {
-        // IPv6 pattern: requires at least 3 hex groups (more strict than before)
-        Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap()
-    });
+pub static IPV6_REGEX: Lazy<Regex> = Lazy::new(|| {
+    // IPv6 pattern: requires at least 3 hex groups (more strict than before)
+    Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap()
+});
 
 pub static URL_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:https?://|ftp://|www\.)(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[^\s]*)?"#).unwrap()
@@ -99,7 +98,8 @@ pub static MALICIOUS_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?x)
+    Regex::new(
+        r#"(?x)
         # JWT tokens (most reliable format: three parts with dots)
         \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
         |
@@ -123,7 +123,9 @@ pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
         |
         # Discord webhook URLs (strict format)
         (?i)https?://(?:discord|discordapp)\.com/api/webhooks/[0-9]{18,}/[A-Za-z0-9_-]+
-    "#).unwrap()
+    "#,
+    )
+    .unwrap()
 });
 
 // ============================================================================
@@ -204,47 +206,39 @@ pub static GOOD_IPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 // IP Address Utilities
 // ============================================================================
 
-fn parse_ip_range(range_str: &str) -> Option<(u32, u32)> {
-    if !range_str.contains('/') {
+fn parse_cidr(cidr: &str) -> Option<(u32, u32)> {
+    let mut parts = cidr.split('/');
+    let ip_str = parts.next()?;
+    let prefix_len = parts.next()?.parse::<u32>().ok()?;
+
+    if prefix_len > 32 {
         return None;
     }
-    let parts: Vec<&str> = range_str.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let ip_parts: Vec<u32> = parts[0]
-        .split('.')
-        .map(|p| p.parse::<u32>().unwrap_or(0))
-        .collect();
-    if ip_parts.len() != 4 {
-        return None;
-    }
-    let ip = (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3];
-    let prefix = parts[1].parse::<u32>().ok()?;
-    if prefix > 32 {
-        return None;
-    }
-    let mask = if prefix == 0 {
+
+    let addr = match ip_str.parse::<std::net::Ipv4Addr>() {
+        Ok(a) => u32::from(a),
+        Err(_) => return None,
+    };
+
+    let mask = if prefix_len == 0 {
         0
     } else {
-        0xffffffff << (32 - prefix)
+        u32::MAX << (32 - prefix_len)
     };
-    Some((ip & mask, mask))
+
+    Some((addr & mask, mask))
 }
 
-fn ip_in_range(ip_str: &str, range_str: &str) -> bool {
-    if let Ok(addr) = ip_str.parse::<IpAddr>() {
-        if let IpAddr::V4(v4) = addr {
-            let octets = v4.octets();
-            let ip = (octets[0] as u32) << 24
-                | (octets[1] as u32) << 16
-                | (octets[2] as u32) << 8
-                | octets[3] as u32;
-            if let Some((range_ip, mask)) = parse_ip_range(range_str) {
-                return (ip & mask) == range_ip;
-            }
-        }
+fn is_ip_in_cidr(ip_str: &str, cidr: &str) -> bool {
+    let addr = match ip_str.parse::<std::net::Ipv4Addr>() {
+        Ok(a) => u32::from(a),
+        Err(_) => return false,
+    };
+
+    if let Some((network, mask)) = parse_cidr(cidr) {
+        return (addr & mask) == network;
     }
+
     false
 }
 
@@ -252,12 +246,12 @@ pub fn is_known_good_ip(ip: &str) -> bool {
     if GOOD_IPS.contains(ip) {
         return true;
     }
-    for good_ip in GOOD_IPS.iter() {
-        if good_ip.contains('/') && ip_in_range(ip, good_ip) {
-            return true;
-        }
-    }
-    false
+
+    // Check CIDR ranges in the whitelist
+    GOOD_IPS
+        .iter()
+        .filter(|&&entry| entry.contains('/'))
+        .any(|&cidr| is_ip_in_cidr(ip, cidr))
 }
 
 pub fn is_public_routable_ip(ip: &str) -> bool {
@@ -281,6 +275,7 @@ pub fn is_public_routable_ip(ip: &str) -> bool {
                 || v4.is_unspecified())
         }
         IpAddr::V6(v6) => {
+            // Check for site-local and documentation which might not be covered by standard is_ methods
             let segments = v6.segments();
             let is_site_local = (segments[0] & 0xffc0) == 0xfec0;
             let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;

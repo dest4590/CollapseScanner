@@ -30,7 +30,7 @@ impl ApiAnalyzer {
                 )
             };
             findings.push((
-                FindingType::SuspiciousApi,
+                FindingType::JavaAPI,
                 format!("Process execution API usage: {}", call_summary),
             ));
         }
@@ -86,7 +86,7 @@ impl ApiAnalyzer {
                 format!("{} (and {} more)", native_calls[0], native_calls.len() - 1)
             };
             findings.push((
-                FindingType::SuspiciousApi,
+                FindingType::JavaAPI,
                 format!("Native bridge or Unsafe API usage:\n\t{}", call_summary),
             ));
         } else if !matched_markers.is_empty() {
@@ -100,7 +100,7 @@ impl ApiAnalyzer {
                 )
             };
             findings.push((
-                FindingType::SuspiciousApi,
+                FindingType::JavaAPI,
                 format!(
                     "Native bridge or Unsafe API usage (referenced in constant pool: {})",
                     string_summary
@@ -184,7 +184,7 @@ impl ApiAnalyzer {
                 format!("{} (and {} more)", matched[0], matched.len() - 1)
             };
             findings.push((
-                FindingType::SuspiciousApi,
+                FindingType::JavaAPI,
                 format!("{}: {}", category_message, details),
             ));
         }
