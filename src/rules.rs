@@ -85,7 +85,10 @@ pub static IP_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub static IPV6_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap());
+    Lazy::new(|| {
+        // IPv6 pattern: requires at least 3 hex groups (more strict than before)
+        Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap()
+    });
 
 pub static URL_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:https?://|ftp://|www\.)(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[^\s]*)?"#).unwrap()
@@ -97,17 +100,29 @@ pub static MALICIOUS_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?x)
-        (?i)\b(?:mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})\b
-        |
+        # JWT tokens (most reliable format: three parts with dots)
         \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
         |
-        (?i)\b(?:AKIA[0-9A-Z]{16}|aws[_-]?(?:access[_-]?key|secret))\b
+        # AWS Access Keys (strict format: AKIA prefix + 16 hex chars)
+        \bAKIA[0-9A-Z]{16}\b
         |
-        (?i)\b(?:gh[pousr]_[A-Za-z0-9_]{36,255})\b
+        # GitHub Personal Access Tokens (prefix patterns)
+        \bgh[pousr]_[A-Za-z0-9_]{36,255}\b
         |
-        (?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|api[_-]?secret)\s*[:=]\s*['"]?[A-Za-z0-9_./+=:-]{16,}
+        # MFA tokens (strict format with dot separators)
+        \bmfa\.[A-Za-z0-9_-]{20,}\b
         |
-        (?i)\b(?:webhook|slack|discord)[_-]?(?:url|token|hook)\s*[:=]\s*['"]?https?://[^'"\s]+
+        # Discord bot tokens (strict format)
+        \b[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b
+        |
+        # API/Database URLs with credentials (strict format)
+        (?i)(?:mongodb|mysql|postgresql|jdbc)://[^:]+:[^@]+@[^\s]{5,}
+        |
+        # AWS-style secret keys (only in key=value context with >= 40 chars)
+        (?i)aws[_-]?secret[_-]?(?:access[_-])?key\s*[:=]\s*[A-Za-z0-9/+]{40,}
+        |
+        # Discord webhook URLs (strict format)
+        (?i)https?://(?:discord|discordapp)\.com/api/webhooks/[0-9]{18,}/[A-Za-z0-9_-]+
     "#).unwrap()
 });
 

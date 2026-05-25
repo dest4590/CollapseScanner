@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use crate::cache::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
 use crate::errors::ScanError;
+use crate::parsers::ClassParser;
 use crate::rules::{
     is_known_good_ip, is_public_routable_ip, IPV6_REGEX, IP_REGEX, MALICIOUS_PATTERN_REGEX,
     SECRET_REGEX, URL_REGEX,
 };
-use crate::parsers::ClassParser;
 use crate::scanner::api_analyzer::ApiAnalyzer;
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{ClassDetails, DetectionMode, FindingType, ResourceInfo, ScanResult};
@@ -122,13 +122,37 @@ impl CollapseScanner {
             }
         }
 
+        self.process_urls(string, findings);
+    }
+
+    fn process_urls(&self, string: &str, findings: &mut Vec<(FindingType, String)>) {
         for m in URL_REGEX.find_iter(string) {
             let url_match = m.as_str();
+
             let domain = extract_domain(url_match);
 
-            if !domain.is_empty()
-                && !self.is_good_link(&domain)
-                && !self.is_suspicious_domain(&domain)
+            if domain.is_empty() {
+                continue;
+            }
+
+            let is_discord = domain.ends_with("discord.com") || domain.ends_with("discordapp.com");
+            if is_discord && url_match.contains("/api/webhooks/") {
+                findings.push((
+                    FindingType::DiscordWebhook,
+                    format!("Discord Webhook: {}", url_match),
+                ));
+                continue;
+            }
+
+            if self.is_suspicious_domain(&domain) {
+                findings.push((
+                    FindingType::SuspiciousUrl,
+                    format!("Suspicious URL: {}", url_match),
+                ));
+                continue;
+            }
+
+            if !self.is_good_link(&domain)
                 && !self.is_local_host(&domain)
                 && !is_known_good_ip(&domain)
             {
@@ -153,35 +177,6 @@ impl CollapseScanner {
             || ends_with_ignore_case(host, ".localdomain")
     }
 
-    fn check_suspicious_url_patterns(
-        &self,
-        string: &str,
-        findings: &mut Vec<(FindingType, String)>,
-    ) {
-        for cap in URL_REGEX.captures_iter(string) {
-            let url_str = &cap[0];
-            let domain = extract_domain(url_str);
-
-            if domain.is_empty() {
-                continue;
-            }
-
-            let is_discord = domain.ends_with("discord.com") || domain.ends_with("discordapp.com");
-
-            if is_discord && url_str.contains("/api/webhooks/") {
-                findings.push((
-                    FindingType::DiscordWebhook,
-                    format!("Discord Webhook: {}", url_str),
-                ));
-            } else if self.is_suspicious_domain(&domain) {
-                findings.push((
-                    FindingType::SuspiciousUrl,
-                    format!("Suspicious URL: {}", url_str),
-                ));
-            }
-        }
-    }
-
     fn is_suspicious_domain(&self, domain: &str) -> bool {
         if self.suspicious_domains.contains(domain) {
             return true;
@@ -190,7 +185,7 @@ impl CollapseScanner {
         self.suspicious_domains.iter().any(|suspicious| {
             domain.ends_with(suspicious)
                 && (domain.len() == suspicious.len()
-                    || domain.as_bytes()[domain.len() - suspicious.len() - 1] == b'.')
+                    || domain.as_bytes().get(domain.len() - suspicious.len() - 1) == Some(&b'.'))
         })
     }
 
@@ -362,14 +357,11 @@ impl CollapseScanner {
 
     fn check_all_patterns(&self, string: &str, findings: &mut Vec<(FindingType, String)>) -> bool {
         let initial_len = findings.len();
-        let has_url = URL_REGEX.is_match(string);
-        let has_network = has_url || IP_REGEX.is_match(string) || IPV6_REGEX.is_match(string);
+        let has_network =
+            URL_REGEX.is_match(string) || IP_REGEX.is_match(string) || IPV6_REGEX.is_match(string);
 
         if has_network {
             self.check_network_patterns(string, findings);
-            if has_url {
-                self.check_suspicious_url_patterns(string, findings);
-            }
         }
 
         if MALICIOUS_PATTERN_REGEX.is_match(string) {
@@ -466,7 +458,6 @@ impl CollapseScanner {
     ) -> bool {
         let initial_len = findings.len();
         self.check_network_patterns(string, findings);
-        self.check_suspicious_url_patterns(string, findings);
         findings.len() == initial_len
     }
 
