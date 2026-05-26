@@ -31,7 +31,7 @@ jobs:
 
             - name: Build
               run: |
-                  cargo build --verbose --release
+                  cargo build --verbose --release --features web-ui
                   $ARTIFACT_HASH=git rev-parse --short HEAD
                   echo "ARTIFACT_HASH=$ARTIFACT_HASH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
               id: build-step-windows
@@ -69,7 +69,7 @@ jobs:
 
             - name: Build
               run: |
-                  cargo build --verbose --release
+                  cargo build --verbose --release --features web-ui
                   ARTIFACT_HASH=$(git rev-parse --short HEAD)
                   echo "ARTIFACT_HASH=$ARTIFACT_HASH" >> $GITHUB_ENV
                   echo "artifact_hash=$ARTIFACT_HASH" >> $GITHUB_OUTPUT
