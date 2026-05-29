@@ -150,7 +150,9 @@ pub fn print_empty_scan_result(path: &Path, exclude_patterns: &[String], find_pa
     );
     println!("{}", BANNER_BOTTOM.bright_blue().bold());
 
-    if !crate::utils::path_contains_scannable_files(path) {
+    if path.is_file() {
+        println!("\n[+] {}", "No findings for the selected file.".green());
+    } else if !crate::utils::path_contains_scannable_files(path) {
         println!(
             "\n[-] {}",
             "No .jar or .class files were found in the target path.".yellow()
