@@ -2,6 +2,6 @@ pub mod system;
 
 pub use system::SystemConfig;
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
-pub static SYSTEM_CONFIG: Lazy<SystemConfig> = Lazy::new(SystemConfig::new);
+pub static SYSTEM_CONFIG: LazyLock<SystemConfig> = LazyLock::new(SystemConfig::new);

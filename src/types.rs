@@ -33,6 +33,19 @@ pub struct ScanResult {
     pub danger_explanation: Vec<String>,
 }
 
+impl ScanResult {
+    pub fn to_json_report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "file_path": self.file_path,
+            "danger_score": self.danger_score,
+            "danger_explanation": self.danger_explanation,
+            "findings": self.matches.iter().map(|(ft, v)|
+                serde_json::json!({"type": format!("{ft}"), "value": v})
+            ).collect::<Vec<_>>(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Progress {
     pub current: usize,
@@ -77,77 +90,147 @@ pub enum FindingType {
     ObfuscationUnicode,
 }
 
-impl std::fmt::Display for FindingType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
-            FindingType::IpAddress => "IPv4 Address",
-            FindingType::IpV6Address => "IPv6 Address",
-            FindingType::Url => "URL",
-            FindingType::SuspiciousUrl => "Network URL",
-            FindingType::DiscordWebhook => "Discord Webhook",
-            FindingType::SuspiciousKeyword => "Sensitive Keyword",
-            FindingType::JavaAPI => "Java API",
-            FindingType::CredentialSecret => "Credential or Token",
-            FindingType::EncodedPayload => "Encoded Payload",
-            FindingType::TamperedClass => "Tampered Class",
-            FindingType::NativeLibrary => "Native Library",
-            FindingType::ArchiveEntry => "Archive Entry",
-            FindingType::ObfuscationUnicode => "Unicode Obfuscation",
-        };
-        f.write_str(label)
-    }
+struct FindingTypeMeta {
+    display: &'static str,
+    symbol: &'static str,
+    color: &'static str,
+    base_score: u8,
+    max_contribution: u8,
+    order: usize,
 }
 
+const FINDING_TYPE_META: &[FindingTypeMeta] = &[
+    FindingTypeMeta {
+        display: "IPv4 Address",
+        symbol: "[IP]",
+        color: "red",
+        base_score: 2,
+        max_contribution: 5,
+        order: 6,
+    },
+    FindingTypeMeta {
+        display: "IPv6 Address",
+        symbol: "[IP]",
+        color: "red",
+        base_score: 2,
+        max_contribution: 5,
+        order: 11,
+    },
+    FindingTypeMeta {
+        display: "URL",
+        symbol: "[URL]",
+        color: "blue",
+        base_score: 1,
+        max_contribution: 4,
+        order: 8,
+    },
+    FindingTypeMeta {
+        display: "Network URL",
+        symbol: "[NET]",
+        color: "yellow",
+        base_score: 5,
+        max_contribution: 8,
+        order: 2,
+    },
+    FindingTypeMeta {
+        display: "Discord Webhook",
+        symbol: "[WEBHOOK]",
+        color: "red",
+        base_score: 10,
+        max_contribution: 10,
+        order: 0,
+    },
+    FindingTypeMeta {
+        display: "Sensitive Keyword",
+        symbol: "[CODE]",
+        color: "red",
+        base_score: 3,
+        max_contribution: 6,
+        order: 7,
+    },
+    FindingTypeMeta {
+        display: "Java API",
+        symbol: "[API]",
+        color: "yellow",
+        base_score: 3,
+        max_contribution: 7,
+        order: 3,
+    },
+    FindingTypeMeta {
+        display: "Credential or Token",
+        symbol: "[SECRET]",
+        color: "red",
+        base_score: 8,
+        max_contribution: 10,
+        order: 4,
+    },
+    FindingTypeMeta {
+        display: "Encoded Payload",
+        symbol: "[BLOB]",
+        color: "magenta",
+        base_score: 2,
+        max_contribution: 5,
+        order: 5,
+    },
+    FindingTypeMeta {
+        display: "Tampered Class",
+        symbol: "[CLASS]",
+        color: "red",
+        base_score: 6,
+        max_contribution: 10,
+        order: 1,
+    },
+    FindingTypeMeta {
+        display: "Native Library",
+        symbol: "[NATIVE]",
+        color: "yellow",
+        base_score: 4,
+        max_contribution: 7,
+        order: 9,
+    },
+    FindingTypeMeta {
+        display: "Archive Entry",
+        symbol: "[ENTRY]",
+        color: "yellow",
+        base_score: 4,
+        max_contribution: 8,
+        order: 10,
+    },
+    FindingTypeMeta {
+        display: "Unicode Obfuscation",
+        symbol: "[OBF]",
+        color: "magenta",
+        base_score: 1,
+        max_contribution: 3,
+        order: 12,
+    },
+];
+
 impl FindingType {
+    fn meta(self) -> &'static FindingTypeMeta {
+        &FINDING_TYPE_META[self as usize]
+    }
+
     pub fn with_symbol(&self) -> (&'static str, &'static str) {
-        match self {
-            FindingType::IpAddress | FindingType::IpV6Address => ("[IP]", "red"),
-            FindingType::Url => ("[URL]", "blue"),
-            FindingType::SuspiciousUrl => ("[NET]", "yellow"),
-            FindingType::DiscordWebhook => ("[WEBHOOK]", "red"),
-            FindingType::SuspiciousKeyword => ("[CODE]", "red"),
-            FindingType::JavaAPI => ("[API]", "yellow"),
-            FindingType::CredentialSecret => ("[SECRET]", "red"),
-            FindingType::EncodedPayload => ("[BLOB]", "magenta"),
-            FindingType::TamperedClass => ("[CLASS]", "red"),
-            FindingType::NativeLibrary => ("[NATIVE]", "yellow"),
-            FindingType::ArchiveEntry => ("[ENTRY]", "yellow"),
-            FindingType::ObfuscationUnicode => ("[OBF]", "magenta"),
-        }
+        (self.meta().symbol, self.meta().color)
     }
 
     pub fn base_score(&self) -> u8 {
-        match self {
-            FindingType::IpAddress | FindingType::IpV6Address => 2,
-            FindingType::Url => 1,
-            FindingType::SuspiciousUrl => 5,
-            FindingType::DiscordWebhook => 10,
-            FindingType::SuspiciousKeyword => 3,
-            FindingType::JavaAPI => 3,
-            FindingType::CredentialSecret => 8,
-            FindingType::EncodedPayload => 2,
-            FindingType::TamperedClass => 6,
-            FindingType::NativeLibrary => 4,
-            FindingType::ArchiveEntry => 4,
-            FindingType::ObfuscationUnicode => 1,
-        }
+        self.meta().base_score
     }
 
     pub fn max_contribution(&self) -> u8 {
-        match self {
-            FindingType::IpAddress | FindingType::IpV6Address => 5,
-            FindingType::Url => 4,
-            FindingType::SuspiciousUrl => 8,
-            FindingType::DiscordWebhook => 10,
-            FindingType::SuspiciousKeyword => 6,
-            FindingType::JavaAPI => 7,
-            FindingType::CredentialSecret => 10,
-            FindingType::EncodedPayload => 5,
-            FindingType::TamperedClass => 10,
-            FindingType::NativeLibrary => 7,
-            FindingType::ArchiveEntry => 8,
-            FindingType::ObfuscationUnicode => 3,
-        }
+        self.meta().max_contribution
+    }
+
+    pub fn display_order(&self) -> usize {
+        self.meta().order
+    }
+}
+
+impl std::fmt::Display for FindingType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.meta().display)
     }
 }
 
@@ -222,6 +305,8 @@ pub struct ScannerOptions {
     pub exclude_patterns: Vec<String>,
     pub find_patterns: Vec<String>,
     pub progress: Option<Arc<Mutex<Progress>>>,
+    pub max_nested_archive_depth: usize,
+    pub max_strings_per_class: usize,
 }
 
 impl Default for ScannerOptions {
@@ -233,6 +318,8 @@ impl Default for ScannerOptions {
             exclude_patterns: Vec::new(),
             find_patterns: Vec::new(),
             progress: None,
+            max_nested_archive_depth: 4,
+            max_strings_per_class: 2000,
         }
     }
 }
@@ -258,4 +345,46 @@ pub enum ConstantPoolEntry {
     Module,
     Package,
     Placeholder,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_finding_type_display() {
+        assert_eq!(FindingType::IpAddress.to_string(), "IPv4 Address");
+        assert_eq!(FindingType::DiscordWebhook.to_string(), "Discord Webhook");
+        assert_eq!(FindingType::JavaAPI.to_string(), "Java API");
+    }
+
+    #[test]
+    fn test_finding_type_base_score() {
+        assert_eq!(FindingType::DiscordWebhook.base_score(), 10);
+        assert_eq!(FindingType::IpAddress.base_score(), 2);
+        assert_eq!(FindingType::SuspiciousKeyword.base_score(), 3);
+        assert_eq!(FindingType::EncodedPayload.base_score(), 2);
+    }
+
+    #[test]
+    fn test_finding_type_max_contribution() {
+        assert_eq!(FindingType::DiscordWebhook.max_contribution(), 10);
+        assert_eq!(FindingType::IpAddress.max_contribution(), 5);
+        assert_eq!(FindingType::CredentialSecret.max_contribution(), 10);
+    }
+
+    #[test]
+    fn test_detection_mode_display() {
+        assert_eq!(DetectionMode::All.to_string(), "All");
+        assert_eq!(DetectionMode::Network.to_string(), "Network");
+    }
+
+    #[test]
+    fn test_scanner_options_default() {
+        let opts = ScannerOptions::default();
+        assert_eq!(opts.mode, DetectionMode::All);
+        assert!(!opts.verbose);
+        assert_eq!(opts.max_nested_archive_depth, 4);
+        assert_eq!(opts.max_strings_per_class, 2000);
+    }
 }

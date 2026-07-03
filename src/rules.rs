@@ -1,7 +1,7 @@
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::LazyLock;
 
 // ============================================================================
 // File Type Extensions
@@ -21,7 +21,7 @@ pub const NATIVE_LIBRARY_EXTENSIONS: &[&str] = &["dll", "so", "dylib", "jnilib"]
 // Suspicious Domains and Hosts
 // ============================================================================
 
-pub static SUSPICIOUS_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
+pub static SUSPICIOUS_DOMAINS: LazyLock<HashSet<String>> = LazyLock::new(|| {
     [
         "discord.com",
         "discordapp.com",
@@ -44,6 +44,8 @@ pub static SUSPICIOUS_DOMAINS: Lazy<HashSet<String>> = Lazy::new(|| {
         "ifconfig.me",
         "bit.ly",
         "tinyurl.com",
+        "api.telegram.org",
+        "raw.githubusercontent.com",
     ]
     .iter()
     .map(|&s| s.to_lowercase())
@@ -80,34 +82,39 @@ pub const SAFE_NATIVE_PACKAGES: &[&str] =
 // Pattern Matching Regex Objects
 // ============================================================================
 
-pub static IP_REGEX: Lazy<Regex> = Lazy::new(|| {
+pub static IP_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap()
 });
 
-pub static IPV6_REGEX: Lazy<Regex> = Lazy::new(|| {
+pub static IPV6_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     // IPv6 pattern: requires at least 3 hex groups (more strict than before)
     Regex::new(r"(?i)\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b").unwrap()
 });
 
-pub static URL_REGEX: Lazy<Regex> = Lazy::new(|| {
+pub static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:https?://|ftp://|www\.)(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?(?::[0-9]{1,5})?(?:/[^\s]*)?"#).unwrap()
 });
 
-pub static MALICIOUS_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
+pub static MALICIOUS_PATTERN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(powershell|cmd(?:\.exe)?|/bin/(?:ba)?sh|Runtime\.getRuntime\(\)\.exec|ProcessBuilder|loadLibrary|System\.load|defineClass|VirtualMachine\.attach|keylogger|clipboard|appdata|\\.minecraft|webhook|readFile|writeFile|decrypt|encrypt)\b").unwrap()
 });
 
-pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
+pub static SECRET_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
         # JWT tokens (most reliable format: three parts with dots)
         \beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
         |
-        # AWS Access Keys (strict format: AKIA prefix + 16 hex chars)
-        \bAKIA[0-9A-Z]{16}\b
+        # AWS Access Keys (strict format: AKIA or ASIA prefix + 16 alphanumeric/hex chars)
+        \b(AKIA|ASIA)[0-9A-Z]{16}\b
         |
-        # GitHub Personal Access Tokens (prefix patterns)
+        # GitHub Personal Access Tokens (prefix patterns: classic and modern)
         \bgh[pousr]_[A-Za-z0-9_]{36,255}\b
+        |
+        \bgithub_pat_[A-Za-z0-9_]{82}\b
+        |
+        # Telegram Bot API tokens
+        \b[0-9]{8,12}:[A-Za-z0-9_-]{35}\b
         |
         # MFA tokens (strict format with dot separators)
         \bmfa\.[A-Za-z0-9_-]{20,}\b
@@ -132,7 +139,7 @@ pub static SECRET_REGEX: Lazy<Regex> = Lazy::new(|| {
 // Known Good Links and IPs (Whitelist)
 // ============================================================================
 
-pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
+pub static GOOD_LINKS: LazyLock<HashSet<String>> = LazyLock::new(|| {
     [
         "aka.ms",
         "apache.org",
@@ -175,7 +182,7 @@ pub static GOOD_LINKS: Lazy<HashSet<String>> = Lazy::new(|| {
     .collect()
 });
 
-pub static GOOD_IPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+pub static GOOD_IPS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         "0.0.0.0",
         "::",
@@ -194,7 +201,7 @@ pub static GOOD_IPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "8.8.4.4",
         "1.1.1.1",
         "9.9.9.9",
-        // just trash
+        // false-positive noise
         "1.3.6.1",
         "123.123.123.123",
     ]
@@ -288,5 +295,73 @@ pub fn is_public_routable_ip(ip: &str) -> bool {
                 || is_documentation
                 || v6.is_multicast())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_known_good_ip_exact() {
+        assert!(is_known_good_ip("127.0.0.1"));
+        assert!(is_known_good_ip("8.8.8.8"));
+        assert!(is_known_good_ip("192.168.0.1"));
+        assert!(!is_known_good_ip("45.33.22.11"));
+    }
+
+    #[test]
+    fn test_is_known_good_ip_cidr() {
+        assert!(is_known_good_ip("10.0.0.1"));
+        assert!(is_known_good_ip("10.255.255.255"));
+        assert!(is_known_good_ip("172.16.0.1"));
+        assert!(!is_known_good_ip("172.15.0.1"));
+    }
+
+    #[test]
+    fn test_is_public_routable_ip_private() {
+        assert!(!is_public_routable_ip("127.0.0.1"));
+        assert!(!is_public_routable_ip("192.168.1.1"));
+        assert!(!is_public_routable_ip("10.0.0.1"));
+        assert!(!is_public_routable_ip("::1"));
+    }
+
+    #[test]
+    fn test_is_public_routable_ip_public() {
+        assert!(is_public_routable_ip("45.33.22.11"));
+        assert!(is_public_routable_ip("104.16.0.1"));
+        assert!(is_public_routable_ip("151.101.1.1"));
+    }
+
+    #[test]
+    fn test_ip_regex_matches() {
+        assert!(IP_REGEX.is_match("connect to 192.168.1.1 test"));
+        assert!(IP_REGEX.is_match("10.0.0.1"));
+        assert!(IP_REGEX.is_match("8.8.8.8"));
+        assert!(!IP_REGEX.is_match("999.999.999.999"));
+    }
+
+    #[test]
+    fn test_url_regex() {
+        assert!(URL_REGEX.is_match("https://example.com/path"));
+        assert!(URL_REGEX.is_match("http://evil.com"));
+        assert!(URL_REGEX.is_match("ftp://files.example.org"));
+        assert!(!URL_REGEX.is_match("just a string"));
+    }
+
+    #[test]
+    fn test_suspicious_domains_contains() {
+        assert!(SUSPICIOUS_DOMAINS.contains("pastebin.com"));
+        assert!(SUSPICIOUS_DOMAINS.contains("ngrok.io"));
+        assert!(!SUSPICIOUS_DOMAINS.contains("google.com"));
+    }
+
+    #[test]
+    fn test_malicious_pattern_regex() {
+        assert!(MALICIOUS_PATTERN_REGEX.is_match("Runtime.getRuntime().exec"));
+        assert!(MALICIOUS_PATTERN_REGEX.is_match("ProcessBuilder"));
+        assert!(MALICIOUS_PATTERN_REGEX.is_match("keylogger"));
+        assert!(MALICIOUS_PATTERN_REGEX.is_match("powershell"));
+        assert!(!MALICIOUS_PATTERN_REGEX.is_match("innocent string"));
     }
 }

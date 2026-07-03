@@ -12,29 +12,65 @@ impl ApiAnalyzer {
     pub fn analyze(details: &ClassDetails, findings: &mut Vec<(FindingType, String)>) {
         let string_set: HashSet<&str> = details.strings.iter().map(String::as_str).collect();
 
-        let process_calls: Vec<String> = details
+        Self::analyze_process_calls(details, findings);
+        Self::analyze_native_bridge(details, findings);
+
+        Self::check_marker(
+            &string_set,
+            DYNAMIC_LOADING_MARKERS,
+            "Dynamic class loading or definition",
+            findings,
+        );
+        Self::check_marker(
+            &string_set,
+            JAVA_AGENT_MARKERS,
+            "Java agent instrumentation",
+            findings,
+        );
+        Self::check_marker(
+            &string_set,
+            ATTACH_API_MARKERS,
+            "JVM attach API usage",
+            findings,
+        );
+
+        let reflected_target = Self::guess_reflected_target(details);
+        if !reflected_target.is_empty() {
+            findings.push((
+                FindingType::JavaAPI,
+                format!("Reflection target: {}", reflected_target),
+            ));
+        }
+    }
+
+    fn summarize(first: &str, count: usize) -> String {
+        if count == 1 {
+            first.to_string()
+        } else {
+            format!("{} (and {} more)", first, count - 1)
+        }
+    }
+
+    fn analyze_process_calls(details: &ClassDetails, findings: &mut Vec<(FindingType, String)>) {
+        let calls: Vec<String> = details
             .method_calls
             .iter()
             .filter(|call| Self::is_process_api_call(call))
             .map(Self::format_process_call)
             .collect();
 
-        if !process_calls.is_empty() {
-            let call_summary = if process_calls.len() == 1 {
-                process_calls[0].clone()
-            } else {
-                format!(
-                    "{} (and {} more)",
-                    process_calls[0],
-                    process_calls.len() - 1
-                )
-            };
+        if !calls.is_empty() {
             findings.push((
                 FindingType::JavaAPI,
-                format!("Process execution API usage: {}", call_summary),
+                format!(
+                    "Process execution API usage: {}",
+                    Self::summarize(&calls[0], calls.len())
+                ),
             ));
         }
+    }
 
+    fn analyze_native_bridge(details: &ClassDetails, findings: &mut Vec<(FindingType, String)>) {
         let native_calls: Vec<String> = details
             .method_calls
             .iter()
@@ -47,12 +83,7 @@ impl ApiAnalyzer {
                     }
                 })
             })
-            .filter(|call| {
-                if call.owner.starts_with("com/sun/jna") {
-                    return false;
-                }
-                true
-            })
+            .filter(|call| !call.owner.starts_with("com/sun/jna"))
             .map(Self::format_native_call)
             .filter(|sig| !SAFE_NATIVE_CALLS.iter().any(|&s| sig.starts_with(s)))
             .collect();
@@ -80,53 +111,22 @@ impl ApiAnalyzer {
         matched_markers.dedup();
 
         if !native_calls.is_empty() {
-            let call_summary = if native_calls.len() == 1 {
-                native_calls[0].clone()
-            } else {
-                format!("{} (and {} more)", native_calls[0], native_calls.len() - 1)
-            };
             findings.push((
                 FindingType::JavaAPI,
-                format!("Native bridge or Unsafe API usage:\n\t{}", call_summary),
+                format!(
+                    "Native bridge or Unsafe API usage:\n\t{}",
+                    Self::summarize(&native_calls[0], native_calls.len())
+                ),
             ));
         } else if !matched_markers.is_empty() {
-            let string_summary = if matched_markers.len() == 1 {
-                matched_markers[0].to_string()
-            } else {
-                format!(
-                    "{} (and {} more)",
-                    matched_markers[0],
-                    matched_markers.len() - 1
-                )
-            };
             findings.push((
                 FindingType::JavaAPI,
                 format!(
                     "Native bridge or Unsafe API usage (referenced in constant pool: {})",
-                    string_summary
+                    Self::summarize(matched_markers[0], matched_markers.len()),
                 ),
             ));
         }
-
-        Self::check_marker(
-            &string_set,
-            DYNAMIC_LOADING_MARKERS,
-            "Dynamic class loading or definition",
-            findings,
-        );
-
-        Self::check_marker(
-            &string_set,
-            JAVA_AGENT_MARKERS,
-            "Java agent instrumentation",
-            findings,
-        );
-        Self::check_marker(
-            &string_set,
-            ATTACH_API_MARKERS,
-            "JVM attach API usage",
-            findings,
-        );
     }
 
     fn is_safe_reference(s: &str) -> bool {
@@ -223,7 +223,6 @@ impl ApiAnalyzer {
         Some(truncate_string(&args.join(" "), 80))
     }
 
-    #[allow(dead_code)]
     fn guess_reflected_target(details: &ClassDetails) -> String {
         if let Some(target) = Self::guess_reflected_target_from_calls(&details.method_calls) {
             return target;
@@ -242,7 +241,6 @@ impl ApiAnalyzer {
         "".to_string()
     }
 
-    #[allow(dead_code)]
     fn guess_reflected_target_from_calls(method_calls: &[MethodCallInfo]) -> Option<String> {
         for call in method_calls {
             if call.owner == "java/lang/Class"
@@ -266,5 +264,72 @@ impl ApiAnalyzer {
         (call.owner == "java/lang/Runtime" && call.name == "exec")
             || (call.owner == "java/lang/ProcessBuilder" && call.name == "<init>")
             || (call.owner == "java/lang/ProcessBuilder" && call.name == "command")
+            || (call.owner == "java/lang/ProcessImpl" && call.name == "start")
+            || (call.owner == "javax/script/ScriptEngineManager" && call.name == "getEngineByName")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_call(owner: &str, name: &str, args: Vec<&str>) -> MethodCallInfo {
+        MethodCallInfo {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            descriptor: "()V".to_string(),
+            arguments: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_is_process_api_call_runtime_exec() {
+        let call = make_call("java/lang/Runtime", "exec", vec!["cmd"]);
+        assert!(ApiAnalyzer::is_process_api_call(&call));
+    }
+
+    #[test]
+    fn test_is_process_api_call_processbuilder() {
+        let call = make_call("java/lang/ProcessBuilder", "<init>", vec![]);
+        assert!(ApiAnalyzer::is_process_api_call(&call));
+    }
+
+    #[test]
+    fn test_is_process_api_call_negative() {
+        let call = make_call("java/lang/String", "length", vec![]);
+        assert!(!ApiAnalyzer::is_process_api_call(&call));
+    }
+
+    #[test]
+    fn test_guess_reflected_target_from_calls_found() {
+        let calls = vec![make_call(
+            "java/lang/Class",
+            "getDeclaredMethod",
+            vec!["evilMethod"],
+        )];
+        let result = ApiAnalyzer::guess_reflected_target_from_calls(&calls);
+        assert_eq!(result, Some("evilMethod".to_string()));
+    }
+
+    #[test]
+    fn test_guess_reflected_target_from_calls_none() {
+        let calls = vec![make_call("java/lang/String", "length", vec![])];
+        let result = ApiAnalyzer::guess_reflected_target_from_calls(&calls);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_is_safe_reference_jna() {
+        assert!(ApiAnalyzer::is_safe_reference("com.sun.jna.Native"));
+        assert!(ApiAnalyzer::is_safe_reference("sun.misc.Unsafe"));
+        assert!(ApiAnalyzer::is_safe_reference("no jna or unsafe here"));
+        assert!(!ApiAnalyzer::is_safe_reference("com.sun.jnaevil"));
+    }
+
+    #[test]
+    fn test_format_native_call() {
+        let call = make_call("java/lang/Runtime", "exec", vec![]);
+        let formatted = ApiAnalyzer::format_native_call(&call);
+        assert_eq!(formatted, "java.lang.Runtime::exec()V");
     }
 }

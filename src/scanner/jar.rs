@@ -1,10 +1,10 @@
-use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use zip::ZipArchive;
 
 use crate::errors::ScanError;
@@ -15,170 +15,123 @@ use crate::rules::{
 use crate::scanner::scan::CollapseScanner;
 use crate::types::{FindingType, ProgressScope, ResourceInfo, ScanResult};
 
-const MAX_NESTED_ARCHIVE_DEPTH: usize = 2;
 const HIGHLY_COMPRESSED_SIZE_THRESHOLD: u64 = 256 * 1024;
 const HIGH_COMPRESSION_RATIO_THRESHOLD: f64 = 40.0;
-const JAR_ENTRY_BATCH_SIZE: usize = 24;
+
+fn get_archive_entry_name(entry_name: &str) -> String {
+    entry_name.replace('\\', "/")
+}
 
 impl CollapseScanner {
-    fn get_archive_entry_name(entry_name: &str) -> String {
-        entry_name.replace('\\', "/")
-    }
-
     pub(crate) fn scan_jar_file(&self, jar_path: &Path) -> Result<Vec<ScanResult>, ScanError> {
         let start_time = Instant::now();
-        let file = File::open(jar_path)?;
-        let mut archive = ZipArchive::new(file)?;
-        let total_files = archive.len();
-        let mut skipped_count = 0;
 
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
-                gp.message = format!("Indexing {}", jar_path.display());
+                gp.message = format!("Reading {}", jar_path.display());
             }
         }
 
-        let mut entries_to_process = Vec::new();
-        for i in 0..total_files {
-            let entry = match archive.by_index(i) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
+        let file_data = std::fs::read(jar_path)?;
 
-            let entry_name = match entry.enclosed_name() {
-                Some(p) => Self::get_archive_entry_name(&p.to_string_lossy()),
-                None => Self::get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
-            };
+        let indices_to_scan: Vec<usize> = {
+            let mut archive = ZipArchive::new(Cursor::new(&file_data[..]))?;
+            let mut indices = Vec::new();
+            let mut skipped = 0;
 
-            if !entry.is_dir() && self.should_scan(&entry_name) {
-                entries_to_process.push(i);
-            } else {
-                skipped_count += 1;
+            for i in 0..archive.len() {
+                let entry = match archive.by_index(i) {
+                    Ok(f) => f,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let name = match entry.enclosed_name() {
+                    Some(p) => get_archive_entry_name(&p.to_string_lossy()),
+                    None => get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
+                };
+                if !entry.is_dir() && self.should_scan(&name) {
+                    indices.push(i);
+                } else {
+                    skipped += 1;
+                }
             }
-        }
 
-        let total_to_scan = total_files;
+            if self.options.verbose {
+                println!(
+                    "[+] JAR indexed: {} entries ({} skipped)",
+                    archive.len(),
+                    skipped
+                );
+            }
+            indices
+        };
+
+        let total_files = indices_to_scan.len();
         let processed_count = Arc::new(AtomicUsize::new(0));
-        let queued_count = Arc::new(AtomicUsize::new(0));
 
         if let Some(ref prog_arc) = self.options.progress {
             if let Ok(mut gp) = prog_arc.lock() {
                 gp.scope = ProgressScope::JarEntries;
-                gp.total = total_to_scan;
+                gp.total = total_files;
                 gp.current = 0;
                 gp.message = format!("Scanning {}", jar_path.display());
             }
         }
 
-        let results_arc = Arc::new(Mutex::new(Vec::with_capacity(total_to_scan)));
-
-        rayon::scope(|scope| {
-            let mut pending_entries = Vec::with_capacity(JAR_ENTRY_BATCH_SIZE);
-
-            for i in entries_to_process {
-                let mut archive_file = match archive.by_index(i) {
+        let results: Vec<ScanResult> = indices_to_scan
+            .par_iter()
+            .flat_map(|&i| {
+                let mut archive = match ZipArchive::new(Cursor::new(&file_data[..])) {
+                    Ok(a) => a,
+                    Err(_) => return Vec::new(),
+                };
+                let mut entry = match archive.by_index(i) {
                     Ok(f) => f,
-                    Err(_) => continue,
+                    Err(_) => return Vec::new(),
                 };
-
-                let original_entry_name = match archive_file.enclosed_name() {
-                    Some(p) => Self::get_archive_entry_name(&p.to_string_lossy()),
-                    None => Self::get_archive_entry_name(&String::from_utf8_lossy(
-                        archive_file.name_raw(),
-                    )),
+                let entry_name = match entry.enclosed_name() {
+                    Some(p) => get_archive_entry_name(&p.to_string_lossy()),
+                    None => get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
                 };
-
-                let file_size = archive_file.size() as usize;
-
+                let file_size = entry.size() as usize;
                 let mut buffer = Vec::with_capacity(file_size);
-                if let Err(e) = archive_file.read_to_end(&mut buffer) {
-                    eprintln!(
-                        "(!) Error reading content of {}: {}",
-                        original_entry_name, e
-                    );
+                if entry.read_to_end(&mut buffer).is_err() {
                     processed_count.fetch_add(1, Ordering::Relaxed);
-                    continue;
+                    return Vec::new();
                 }
+                let compressed_size = entry.compressed_size();
 
-                let compressed_size = archive_file.compressed_size();
-                let progress_entry_name = original_entry_name.clone();
-                pending_entries.push((original_entry_name, compressed_size, buffer));
-                let queued = queued_count.fetch_add(1, Ordering::Relaxed) + 1;
-
+                let progress_name = entry_name.clone();
                 if let Some(ref prog_arc) = self.options.progress {
                     if let Ok(mut gp) = prog_arc.lock() {
                         if gp.scope == ProgressScope::JarEntries {
-                            gp.current = queued.min(gp.total.max(1));
-                            gp.message = progress_entry_name;
+                            gp.current = gp.current.saturating_add(1).min(gp.total.max(1));
+                            gp.message = progress_name;
                         }
                     }
                 }
 
-                if pending_entries.len() >= JAR_ENTRY_BATCH_SIZE {
-                    let entries = std::mem::replace(
-                        &mut pending_entries,
-                        Vec::with_capacity(JAR_ENTRY_BATCH_SIZE),
-                    );
-                    let processed_count_clone = processed_count.clone();
-                    let results_clone = results_arc.clone();
-
-                    scope.spawn(move |_| {
-                        let mut batch_results = Vec::new();
-
-                        for (entry_name, compressed_size, buffer) in entries {
-                            if let Ok(mut entry_results) = self.process_jar_entry(
-                                &entry_name,
-                                &buffer,
-                                compressed_size,
-                                &processed_count_clone,
-                            ) {
-                                batch_results.append(&mut entry_results);
-                            }
-                        }
-
-                        if !batch_results.is_empty() {
-                            results_clone.lock().unwrap().append(&mut batch_results);
-                        }
-                    });
+                match self.process_jar_entry(
+                    &entry_name,
+                    &buffer,
+                    compressed_size,
+                    &processed_count,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        processed_count.fetch_add(1, Ordering::Relaxed);
+                        Vec::new()
+                    }
                 }
-            }
-
-            if !pending_entries.is_empty() {
-                let entries = pending_entries;
-                let processed_count_clone = processed_count.clone();
-                let results_clone = results_arc.clone();
-
-                scope.spawn(move |_| {
-                    let mut batch_results = Vec::new();
-
-                    for (entry_name, compressed_size, buffer) in entries {
-                        if let Ok(mut entry_results) = self.process_jar_entry(
-                            &entry_name,
-                            &buffer,
-                            compressed_size,
-                            &processed_count_clone,
-                        ) {
-                            batch_results.append(&mut entry_results);
-                        }
-                    }
-
-                    if !batch_results.is_empty() {
-                        results_clone.lock().unwrap().append(&mut batch_results);
-                    }
-                });
-            }
-        });
-
-        let results = Arc::into_inner(results_arc)
-            .expect("All threads should have finished")
-            .into_inner()
-            .unwrap();
+            })
+            .collect();
 
         if self.options.verbose {
             println!(
-                "[+] JAR scan completed in {:.2}s ({} skipped, {} analyzed)",
+                "[+] JAR scan completed in {:.2}s ({} analyzed)",
                 start_time.elapsed().as_secs_f64(),
-                skipped_count,
                 processed_count.load(Ordering::Relaxed)
             );
         }
@@ -187,13 +140,11 @@ impl CollapseScanner {
             if let Ok(mut gp) = prog_arc.lock() {
                 if gp.scope == ProgressScope::JarEntries {
                     gp.current = gp.total;
-                    gp.message = format!(
-                        "Finished queuing {} entries",
-                        queued_count.load(Ordering::Relaxed)
-                    );
+                    gp.message = "Finished scanning JAR".to_string();
                 }
             }
         }
+
         Ok(results)
     }
 
@@ -259,7 +210,7 @@ impl CollapseScanner {
             }
         }
 
-        if archive_depth < MAX_NESTED_ARCHIVE_DEPTH
+        if archive_depth < self.options.max_nested_archive_depth
             && self.should_recurse_into_archive(resource_name, buffer)
         {
             results.extend(self.scan_nested_archive_buffer(
@@ -301,10 +252,8 @@ impl CollapseScanner {
             };
 
             let relative_name = match archive_file.enclosed_name() {
-                Some(path) => Self::get_archive_entry_name(&path.to_string_lossy()),
-                None => {
-                    Self::get_archive_entry_name(&String::from_utf8_lossy(archive_file.name_raw()))
-                }
+                Some(path) => get_archive_entry_name(&path.to_string_lossy()),
+                None => get_archive_entry_name(&String::from_utf8_lossy(archive_file.name_raw())),
             };
 
             if archive_file.is_dir() || !self.should_scan(&relative_name) {

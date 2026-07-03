@@ -2,14 +2,40 @@
 ///
 /// This module parses Java bytecode (.class files) and extracts:
 /// - Class metadata (name, superclass, interfaces)
-/// - Methods and fields  
+/// - Methods and fields
 /// - Constant pool
 /// - Method invocations
 /// - String literals
 ///
 use crate::errors::ScanError;
 use crate::types::{ClassDetails, ConstantPoolEntry, FieldInfo, MethodCallInfo, MethodInfo};
-use byteorder::{BigEndian, ReadBytesExt};
+use std::io::Read;
+
+trait ReadClassExt {
+    fn read_u8(&mut self) -> std::io::Result<u8>;
+    fn read_u16(&mut self) -> std::io::Result<u16>;
+    fn read_u32(&mut self) -> std::io::Result<u32>;
+}
+
+impl<T: Read> ReadClassExt for T {
+    fn read_u8(&mut self) -> std::io::Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_u16(&mut self) -> std::io::Result<u16> {
+        let mut buf = [0u8; 2];
+        self.read_exact(&mut buf)?;
+        Ok(u16::from_be_bytes(buf))
+    }
+
+    fn read_u32(&mut self) -> std::io::Result<u32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(u32::from_be_bytes(buf))
+    }
+}
 use colored::Colorize;
 use std::collections::{HashSet, VecDeque};
 use std::io::{Cursor, Seek, SeekFrom};
@@ -132,10 +158,10 @@ where
             file_path_str,
             &format!("{} header {}", member_kind, index),
         )?;
-        let access_flags = cursor.read_u16::<BigEndian>()?;
-        let name_index = cursor.read_u16::<BigEndian>()?;
-        let descriptor_index = cursor.read_u16::<BigEndian>()?;
-        let attributes_count = cursor.read_u16::<BigEndian>()?;
+        let access_flags = cursor.read_u16()?;
+        let name_index = cursor.read_u16()?;
+        let descriptor_index = cursor.read_u16()?;
+        let attributes_count = cursor.read_u16()?;
 
         let name = resolve_utf8(pool, name_index, file_path_str)
             .map(str::to_string)
@@ -434,10 +460,10 @@ fn parse_methods(
             file_path_str,
             &format!("method header {}", index),
         )?;
-        let access_flags = cursor.read_u16::<BigEndian>()?;
-        let name_index = cursor.read_u16::<BigEndian>()?;
-        let descriptor_index = cursor.read_u16::<BigEndian>()?;
-        let attributes_count = cursor.read_u16::<BigEndian>()?;
+        let access_flags = cursor.read_u16()?;
+        let name_index = cursor.read_u16()?;
+        let descriptor_index = cursor.read_u16()?;
+        let attributes_count = cursor.read_u16()?;
 
         let name = resolve_utf8(pool, name_index, file_path_str)
             .map(str::to_string)
@@ -459,8 +485,8 @@ fn parse_methods(
 
         for _ in 0..attributes_count {
             check_bounds(cursor, 6, file_path_str, "method attribute header")?;
-            let attribute_name_index = cursor.read_u16::<BigEndian>()?;
-            let attribute_length = cursor.read_u32::<BigEndian>()? as u64;
+            let attribute_name_index = cursor.read_u16()?;
+            let attribute_length = cursor.read_u32()? as u64;
             let attribute_name = resolve_utf8(pool, attribute_name_index, file_path_str)
                 .map(str::to_string)
                 .unwrap_or_default();
@@ -484,9 +510,9 @@ fn parse_methods(
                 let mut code_cursor =
                     Cursor::new(&code_slice[code_start..code_start + attribute_length as usize]);
                 check_bounds(&code_cursor, 8, file_path_str, "Code attribute header")?;
-                let _max_stack = code_cursor.read_u16::<BigEndian>()?;
-                let _max_locals = code_cursor.read_u16::<BigEndian>()?;
-                let code_length = code_cursor.read_u32::<BigEndian>()? as usize;
+                let _max_stack = code_cursor.read_u16()?;
+                let _max_locals = code_cursor.read_u16()?;
+                let code_length = code_cursor.read_u32()? as usize;
                 check_bounds(
                     &code_cursor,
                     code_length as u64,
@@ -507,7 +533,7 @@ fn parse_methods(
                     file_path_str,
                     "Code exception table header",
                 )?;
-                let exception_table_length = code_cursor.read_u16::<BigEndian>()?;
+                let exception_table_length = code_cursor.read_u16()?;
                 code_cursor.seek(SeekFrom::Current((exception_table_length as i64) * 8))?;
                 check_bounds(
                     &code_cursor,
@@ -515,7 +541,7 @@ fn parse_methods(
                     file_path_str,
                     "Code nested attributes count",
                 )?;
-                let nested_attributes_count = code_cursor.read_u16::<BigEndian>()?;
+                let nested_attributes_count = code_cursor.read_u16()?;
                 skip_attributes(&mut code_cursor, nested_attributes_count, file_path_str)?;
 
                 cursor.seek(SeekFrom::Current(attribute_length as i64))?;
@@ -566,7 +592,7 @@ fn parse_constant_pool(
         let entry_slots: u16 = match tag {
             1 => {
                 check_bounds(cursor, 2, file_path_str, "UTF8 length")?;
-                let length = cursor.read_u16::<BigEndian>()? as usize;
+                let length = cursor.read_u16()? as usize;
                 let current_pos = cursor.position() as usize;
                 let end_pos = current_pos + length;
                 let data = cursor.get_ref();
@@ -618,13 +644,13 @@ fn parse_constant_pool(
 
             7 => {
                 check_bounds(cursor, 2, file_path_str, "Class index")?;
-                constant_pool.push(ConstantPoolEntry::Class(cursor.read_u16::<BigEndian>()?));
+                constant_pool.push(ConstantPoolEntry::Class(cursor.read_u16()?));
                 1
             }
 
             8 => {
                 check_bounds(cursor, 2, file_path_str, "String index")?;
-                constant_pool.push(ConstantPoolEntry::String(cursor.read_u16::<BigEndian>()?));
+                constant_pool.push(ConstantPoolEntry::String(cursor.read_u16()?));
                 1
             }
 
@@ -635,8 +661,8 @@ fn parse_constant_pool(
                     file_path_str,
                     "Field/Method/Interface ref indices",
                 )?;
-                let index1 = cursor.read_u16::<BigEndian>()?;
-                let index2 = cursor.read_u16::<BigEndian>()?;
+                let index1 = cursor.read_u16()?;
+                let index2 = cursor.read_u16()?;
                 constant_pool.push(match tag {
                     9 => ConstantPoolEntry::Fieldref(index1, index2),
                     10 => ConstantPoolEntry::Methodref(index1, index2),
@@ -648,8 +674,8 @@ fn parse_constant_pool(
 
             12 => {
                 check_bounds(cursor, 4, file_path_str, "NameAndType indices")?;
-                let index1 = cursor.read_u16::<BigEndian>()?;
-                let index2 = cursor.read_u16::<BigEndian>()?;
+                let index1 = cursor.read_u16()?;
+                let index2 = cursor.read_u16()?;
                 constant_pool.push(ConstantPoolEntry::NameAndType(index1, index2));
                 1
             }
@@ -720,8 +746,8 @@ fn skip_attributes(
 ) -> Result<(), ScanError> {
     for _ in 0..attributes_count {
         check_bounds(cursor, 6, file_path_str, "attribute header")?;
-        let _attribute_name_index = cursor.read_u16::<BigEndian>()?;
-        let attribute_length = cursor.read_u32::<BigEndian>()? as u64;
+        let _attribute_name_index = cursor.read_u16()?;
+        let attribute_length = cursor.read_u32()? as u64;
 
         check_bounds(
             cursor,
@@ -751,7 +777,7 @@ impl ClassParser {
             });
         }
 
-        let magic = cursor.read_u32::<BigEndian>()?;
+        let magic = cursor.read_u32()?;
         if magic != 0xCAFEBABE {
             return Err(ScanError::ClassParseError {
                 path: original_path_str.to_string(),
@@ -761,9 +787,9 @@ impl ClassParser {
                 ),
             });
         }
-        let _minor_version = cursor.read_u16::<BigEndian>()?;
-        let _major_version = cursor.read_u16::<BigEndian>()?;
-        let cp_count = cursor.read_u16::<BigEndian>()?;
+        let _minor_version = cursor.read_u16()?;
+        let _major_version = cursor.read_u16()?;
+        let cp_count = cursor.read_u16()?;
         if cp_count == 0 {
             return Err(ScanError::ClassParseError {
                 path: original_path_str.to_string(),
@@ -779,9 +805,9 @@ impl ClassParser {
             original_path_str,
             "access_flags, this_class, super_class",
         )?;
-        let access_flags = cursor.read_u16::<BigEndian>()?;
-        let this_class_index = cursor.read_u16::<BigEndian>()?;
-        let super_class_index = cursor.read_u16::<BigEndian>()?;
+        let access_flags = cursor.read_u16()?;
+        let this_class_index = cursor.read_u16()?;
+        let super_class_index = cursor.read_u16()?;
 
         let class_name = resolve_class_name(
             &constant_pool,
@@ -797,7 +823,7 @@ impl ClassParser {
         )?;
 
         check_bounds(&cursor, 2, original_path_str, "interfaces_count")?;
-        let interfaces_count = cursor.read_u16::<BigEndian>()?;
+        let interfaces_count = cursor.read_u16()?;
         let mut interfaces = Vec::with_capacity(interfaces_count as usize);
         for i in 0..interfaces_count {
             check_bounds(
@@ -806,7 +832,7 @@ impl ClassParser {
                 original_path_str,
                 &format!("interface index {}", i),
             )?;
-            let interface_index = cursor.read_u16::<BigEndian>()?;
+            let interface_index = cursor.read_u16()?;
 
             interfaces.push(resolve_class_name(
                 &constant_pool,
@@ -817,7 +843,7 @@ impl ClassParser {
         }
 
         check_bounds(&cursor, 2, original_path_str, "fields_count")?;
-        let fields_count = cursor.read_u16::<BigEndian>()?;
+        let fields_count = cursor.read_u16()?;
         let fields = parse_members(
             &mut cursor,
             fields_count,
@@ -833,7 +859,7 @@ impl ClassParser {
         )?;
 
         check_bounds(&cursor, 2, original_path_str, "methods_count")?;
-        let methods_count = cursor.read_u16::<BigEndian>()?;
+        let methods_count = cursor.read_u16()?;
         let (methods, method_calls) = parse_methods(
             &mut cursor,
             methods_count,
@@ -880,3 +906,4 @@ impl ClassParser {
         })
     }
 }
+

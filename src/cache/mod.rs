@@ -1,10 +1,9 @@
-use once_cell::sync::Lazy;
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
-pub static SAFE_STRING_CACHE: Lazy<Arc<RwLock<HashSet<String>>>> =
-    Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
+pub static SAFE_STRING_CACHE: LazyLock<Arc<RwLock<HashSet<String>>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(HashSet::new())));
 
 pub fn is_cached_safe_string(s: &str) -> bool {
     if let Ok(cache) = SAFE_STRING_CACHE.read() {

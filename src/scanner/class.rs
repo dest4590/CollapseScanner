@@ -1,8 +1,8 @@
-use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use crate::cache::{cache_safe_string, calculate_detection_hash, is_cached_safe_string};
 use crate::errors::ScanError;
@@ -22,12 +22,19 @@ const BASE64_ENTROPY_THRESHOLD: f64 = 5.0;
 const HEX_ENTROPY_THRESHOLD: f64 = 3.8;
 const PARALLEL_STRING_SCAN_THRESHOLD: usize = 96;
 
-static DIRECT_MEMORY_ACCESS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)sun\.misc\.unsafe|jdk\.internal\.misc\.unsafe").unwrap());
-static BYTECODE_INVOCATION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)invokestatic|invokespecial|invokevirtual").unwrap());
-static GENERIC_TYPE_MANIPULATION: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)creatensforprefix|genericsignature").unwrap());
+static DIRECT_MEMORY_ACCESS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)sun\.misc\.unsafe|jdk\.internal\.misc\.unsafe").unwrap());
+static BYTECODE_INVOCATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)invokestatic|invokespecial|invokevirtual").unwrap());
+static GENERIC_TYPE_MANIPULATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)creatensforprefix|genericsignature").unwrap());
+
+fn compute_shannon_entropy(counts: &[usize; 256], total: f64) -> f64 {
+    counts.iter().filter(|&&c| c > 0).fold(0.0, |e, &c| {
+        let p = c as f64 / total;
+        e - p * p.log2()
+    })
+}
 
 impl CollapseScanner {
     const MAX_SCAN_STRING_LEN: usize = 2048;
@@ -42,13 +49,14 @@ impl CollapseScanner {
             None => self.analyze_resource(original_path_str, &data)?,
         };
 
+        let file_path = res_info.path.clone();
         let result = self
-            .scan_class_data(&data, &res_info.path, Some(res_info.clone()))?
+            .scan_class_data(&data, &file_path, Some(res_info))?
             .unwrap_or_else(|| ScanResult {
-                file_path: res_info.path.clone(),
+                file_path,
                 matches: Arc::new(Vec::new()),
                 class_details: None,
-                resource_info: Some(res_info.clone()),
+                resource_info: None,
                 danger_score: 1,
                 danger_explanation: vec!["No suspicious elements detected.".to_string()],
             });
@@ -231,15 +239,18 @@ impl CollapseScanner {
     }
 
     fn redact_secret(&self, secret: &str) -> String {
-        let visible_prefix: String = secret.chars().take(8).collect();
-        let visible_suffix_chars: Vec<char> = secret.chars().rev().take(4).collect();
-        let visible_suffix: String = visible_suffix_chars.into_iter().rev().collect();
-        format!(
-            "{}...{} ({} chars)",
-            visible_prefix,
-            visible_suffix,
-            secret.chars().count()
-        )
+        let chars: Vec<char> = secret.chars().collect();
+        let total = chars.len();
+        let prefix: String = chars.iter().take(8).collect();
+        let suffix: String = chars
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{}...{} ({} chars)", prefix, suffix, total)
     }
 
     fn analyze_base64_candidate(&self, input: &str) -> Option<f64> {
@@ -278,16 +289,7 @@ impl CollapseScanner {
             return None;
         }
 
-        let len = input.len() as f64;
-        let entropy = counts
-            .iter()
-            .filter(|&&count| count > 0)
-            .fold(0.0, |entropy, &count| {
-                let probability = count as f64 / len;
-                entropy - probability * probability.log2()
-            });
-
-        Some(entropy)
+        Some(compute_shannon_entropy(&counts, input.len() as f64))
     }
 
     fn analyze_hex_candidate(&self, input: &str) -> Option<f64> {
@@ -317,16 +319,7 @@ impl CollapseScanner {
             return None;
         }
 
-        let len = input.len() as f64;
-        let entropy = counts
-            .iter()
-            .filter(|&&count| count > 0)
-            .fold(0.0, |entropy, &count| {
-                let probability = count as f64 / len;
-                entropy - probability * probability.log2()
-            });
-
-        Some(entropy)
+        Some(compute_shannon_entropy(&counts, input.len() as f64))
     }
 
     fn check_encoded_payloads(&self, string: &str, findings: &mut Vec<(FindingType, String)>) {
@@ -377,59 +370,126 @@ impl CollapseScanner {
         findings.len() == initial_len
     }
 
-    fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
-        let needle_bytes = needle.as_bytes();
-
-        haystack
-            .as_bytes()
-            .windows(needle_bytes.len())
-            .any(|window| window.eq_ignore_ascii_case(needle_bytes))
-    }
-
-    fn looks_like_network_candidate(input: &str) -> bool {
-        input.bytes().any(|byte| byte.is_ascii_digit())
-            || input.contains('.')
-            || input.contains(':')
-            || input.contains('/')
-            || Self::contains_ascii_case_insensitive(input, "http")
-            || Self::contains_ascii_case_insensitive(input, "www")
-            || Self::contains_ascii_case_insensitive(input, "ftp")
-    }
-
-    fn looks_like_token_blob(input: &str) -> bool {
-        input.len() >= MIN_BASE64_BLOB_LEN
-            && input.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric()
-                    || matches!(byte, b'+' | b'/' | b'=' | b'-' | b'_' | b'.' | b':')
-            })
-    }
-
-    fn looks_like_malicious_candidate(input: &str) -> bool {
-        Self::looks_like_token_blob(input)
-            || input.contains('=')
-            || input.contains(':')
-            || input.contains('_')
-            || input.contains('/')
-            || input.contains('\\')
-            || input.contains('.')
-            || [
-                "runtime", "process", "class", "unsafe", "token", "secret", "password", "webhook",
-                "discord", "key",
-            ]
-            .iter()
-            .any(|needle| Self::contains_ascii_case_insensitive(input, needle))
-    }
-
     fn should_scan_string_candidate(&self, input: &str) -> bool {
         match self.options.mode {
-            DetectionMode::All => {
-                Self::looks_like_network_candidate(input)
-                    || Self::looks_like_malicious_candidate(input)
-            }
+            DetectionMode::All => Self::looks_like_any_candidate(input),
             DetectionMode::Network => Self::looks_like_network_candidate(input),
             DetectionMode::Malicious => Self::looks_like_malicious_candidate(input),
             DetectionMode::Obfuscation => false,
         }
+    }
+
+    fn scan_string_features(input: &str) -> (bool, bool, bool, bool, bool, bool, bool, bool) {
+        let mut has_digit = false;
+        let mut has_dot = false;
+        let mut has_colon = false;
+        let mut has_slash = false;
+        let mut has_eq = false;
+        let mut has_underscore = false;
+        let mut has_backslash = false;
+        let mut all_token = true;
+        let buf = input.as_bytes();
+
+        for &b in buf {
+            match b {
+                b'0'..=b'9' => has_digit = true,
+                b'.' => has_dot = true,
+                b':' => has_colon = true,
+                b'/' => has_slash = true,
+                b'=' => has_eq = true,
+                b'_' => has_underscore = true,
+                b'\\' => has_backslash = true,
+                _ => {
+                    if all_token
+                        && !b.is_ascii_alphanumeric()
+                        && !matches!(b, b'+' | b'/' | b'=' | b'-' | b'_' | b'.' | b':')
+                    {
+                        all_token = false;
+                    }
+                }
+            }
+        }
+
+        (
+            has_digit,
+            has_dot,
+            has_colon,
+            has_slash,
+            has_eq,
+            has_underscore,
+            has_backslash,
+            all_token && input.len() >= MIN_BASE64_BLOB_LEN,
+        )
+    }
+
+    fn looks_like_network_candidate(input: &str) -> bool {
+        let (d, dt, c, s, _, _, _, _) = Self::scan_string_features(input);
+        let has_ni = (input.len() >= 4
+            && input
+                .as_bytes()
+                .windows(4)
+                .any(|w| w.eq_ignore_ascii_case(b"http")))
+            || (input.len() >= 3
+                && input
+                    .as_bytes()
+                    .windows(3)
+                    .any(|w| w.eq_ignore_ascii_case(b"www")))
+            || Self::contains_ascii_case_insensitive(input, "ftp");
+        d || dt || c || s || has_ni
+    }
+
+    fn looks_like_malicious_candidate(input: &str) -> bool {
+        let (_, dt, c, s, e, u, bs, all_tok) = Self::scan_string_features(input);
+        if all_tok {
+            return true;
+        }
+        e || c || u || s || bs || dt || Self::contains_any_keyword(input)
+    }
+
+    fn looks_like_any_candidate(input: &str) -> bool {
+        let (d, dt, c, s, e, u, bs, all_tok) = Self::scan_string_features(input);
+        let has_ni = d
+            || dt
+            || c
+            || s
+            || (input.len() >= 4
+                && input
+                    .as_bytes()
+                    .windows(4)
+                    .any(|w| w.eq_ignore_ascii_case(b"http")))
+            || (input.len() >= 3
+                && input
+                    .as_bytes()
+                    .windows(3)
+                    .any(|w| w.eq_ignore_ascii_case(b"www")))
+            || Self::contains_ascii_case_insensitive(input, "ftp");
+        if has_ni {
+            return true;
+        }
+        if all_tok {
+            return true;
+        }
+        e || c || u || s || bs || dt || Self::contains_any_keyword(input)
+    }
+
+    fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+    }
+
+    fn contains_any_keyword(input: &str) -> bool {
+        let buf = input.as_bytes();
+        [
+            "runtime", "process", "class", "unsafe", "token", "secret", "password", "webhook",
+            "discord", "key",
+        ]
+        .iter()
+        .any(|needle| {
+            buf.windows(needle.len())
+                .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+        })
     }
 
     fn scan_one_string(
@@ -907,7 +967,7 @@ impl CollapseScanner {
                     && !is_cached_safe_string(s)
                     && self.should_scan_string_candidate(s)
             })
-            .take(2000)
+            .take(self.options.max_strings_per_class)
             .collect::<Vec<_>>()
     }
 
@@ -1015,5 +1075,68 @@ impl CollapseScanner {
             resource_info,
             Some(class_details),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ScannerOptions;
+
+    #[test]
+    fn test_compute_entropy_uniform() {
+        let mut counts = [0usize; 256];
+        for count in counts.iter_mut().take(16) {
+            *count = 1;
+        }
+        let entropy = compute_shannon_entropy(&counts, 16.0);
+        assert!((entropy - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_entropy_single() {
+        let mut counts = [0usize; 256];
+        counts[65] = 100;
+        let entropy = compute_shannon_entropy(&counts, 100.0);
+        assert!(entropy.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_scan_string_features_token_chars() {
+        let (_, _, _, _, _, _, _, all_tok) = CollapseScanner::scan_string_features("abcd1234+=");
+        // all_token is false because input is too short for token blob detection
+        assert!(!all_tok);
+    }
+
+    #[test]
+    fn test_scan_string_features_has_digit() {
+        let (d, _, _, _, _, _, _, _) = CollapseScanner::scan_string_features("hello123");
+        assert!(d);
+    }
+
+    #[test]
+    fn test_scan_string_features_has_dot() {
+        let (_, dt, _, _, _, _, _, _) = CollapseScanner::scan_string_features("hello.world");
+        assert!(dt);
+    }
+
+    #[test]
+    fn test_contains_any_keyword() {
+        assert!(CollapseScanner::contains_any_keyword(
+            "Runtime.getRuntime().exec"
+        ));
+        assert!(CollapseScanner::contains_any_keyword("ProcessBuilder"));
+        assert!(!CollapseScanner::contains_any_keyword("innocent string"));
+    }
+
+    #[test]
+    fn test_normalize_findings_dedup() {
+        let mut findings = vec![
+            (FindingType::IpAddress, "8.8.8.8".into()),
+            (FindingType::IpAddress, "8.8.8.8".into()),
+        ];
+        let scanner = CollapseScanner::new(ScannerOptions::default()).unwrap();
+        scanner.normalize_findings(&mut findings);
+        assert_eq!(findings.len(), 1);
     }
 }

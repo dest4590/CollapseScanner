@@ -14,8 +14,6 @@ pub struct CollapseScanner {
     pub good_links: std::collections::HashSet<String>,
     pub suspicious_domains: std::collections::HashSet<String>,
     pub ignored_suspicious_keywords: std::collections::HashSet<String>,
-    pub exclude_patterns: Vec<String>,
-    pub find_patterns: Vec<String>,
     pub result_cache: ResultCache,
 }
 
@@ -35,7 +33,7 @@ impl CollapseScanner {
                     if options.verbose {
                         println!("[+] Loaded {} keywords to ignore", ignored.len());
                     }
-                    ignored_suspicious_keywords.extend(ignored.clone());
+                    ignored_suspicious_keywords.extend(ignored);
                 }
                 Err(e) => {
                     eprintln!(
@@ -51,17 +49,12 @@ impl CollapseScanner {
             SYSTEM_CONFIG.log_config();
         }
 
-        let exclude_patterns = options.exclude_patterns.clone();
-        let find_patterns = options.find_patterns.clone();
-
         Ok(CollapseScanner {
             good_links,
             suspicious_domains: (*SUSPICIOUS_DOMAINS).clone(),
             ignored_suspicious_keywords,
             options,
             found_custom_jvm_indicator: Arc::new(std::sync::Mutex::new(false)),
-            exclude_patterns,
-            find_patterns,
             result_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }

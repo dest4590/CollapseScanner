@@ -2,15 +2,57 @@
 //!
 //! Provides functions for formatting and displaying scan results in text and JSON formats.
 
-use crate::{
-    calculate_scan_score,
-    types::{FindingType, ScanResult},
-};
+use crate::types::{FindingType, ScanResult};
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
+
+pub fn calculate_scan_score(results: &[&ScanResult]) -> (u8, &'static str, &'static str) {
+    if results.is_empty() {
+        return (1, "green", "MINIMAL RISK");
+    }
+
+    let mut weighted_sum: u32 = 0;
+    let mut weight_total: u32 = 0;
+    let mut max_danger_score: u8 = 0;
+
+    for result in results {
+        let weight = if result.danger_score >= 8 { 5 } else { 1 };
+        weighted_sum += (result.danger_score as u32) * weight;
+        weight_total += weight;
+        max_danger_score = max_danger_score.max(result.danger_score);
+    }
+
+    let weighted_avg = (weighted_sum as f32 / weight_total as f32).round() as u8;
+    let score = if max_danger_score == 10 {
+        10
+    } else {
+        weighted_avg.max(max_danger_score).clamp(1, 10)
+    };
+
+    let score_color = match score {
+        1 => "green",
+        2 => "bright_green",
+        3 => "cyan",
+        4 => "bright_cyan",
+        5 => "yellow",
+        6 => "bright_yellow",
+        7 => "magenta",
+        8..=10 => "red",
+        _ => "green",
+    };
+
+    let risk_level = match score {
+        8..=10 => "HIGH RISK",
+        5..=7 => "MODERATE RISK",
+        3..=4 => "LOW RISK",
+        _ => "MINIMAL RISK",
+    };
+
+    (score, score_color, risk_level)
+}
 
 pub fn collect_finding_stats(
     results: &[&ScanResult],
@@ -73,14 +115,15 @@ pub fn print_banner() {
     println!("{}", BANNER_BOTTOM.bright_blue().bold());
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn print_scan_config(
     path: &Path,
-    mode_label: String,
+    mode_label: &str,
     mode_description: &str,
-    config_path: &Option<std::path::PathBuf>,
+    config_path: Option<&std::path::Path>,
     exclude_patterns: &[String],
     find_patterns: &[String],
-    ignore_keywords_file: &Option<std::path::PathBuf>,
+    ignore_keywords_file: Option<&std::path::Path>,
     verbose: bool,
 ) {
     println!("\n  {}", "SCAN SETUP".bright_white().bold());
@@ -90,10 +133,10 @@ pub fn print_scan_config(
         path.display().to_string().bright_white()
     );
     println!(
-        "  {} {} {}",
+        "  {} {} ({})",
         "Mode:  ".bright_white(),
         mode_label.bright_cyan(),
-        format!("({})", mode_description).bright_white()
+        mode_description.bright_white(),
     );
 
     if let Some(config_path) = config_path {
@@ -223,7 +266,7 @@ pub fn print_detailed_file_report(results: &[&ScanResult]) {
         .copied()
         .collect::<Vec<_>>();
 
-    sorted.sort_by(|a, b| b.danger_score.cmp(&a.danger_score));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.danger_score));
 
     print_section_header("FINDINGS BY FILE");
 
@@ -254,23 +297,10 @@ pub fn print_detailed_file_report(results: &[&ScanResult]) {
             grouped.entry(*ft).or_default().push(value.clone());
         }
 
-        let order = [
-            FindingType::DiscordWebhook,
-            FindingType::TamperedClass,
-            FindingType::SuspiciousUrl,
-            FindingType::JavaAPI,
-            FindingType::CredentialSecret,
-            FindingType::EncodedPayload,
-            FindingType::IpAddress,
-            FindingType::SuspiciousKeyword,
-            FindingType::Url,
-            FindingType::NativeLibrary,
-            FindingType::ArchiveEntry,
-            FindingType::IpV6Address,
-            FindingType::ObfuscationUnicode,
-        ];
+        let mut ordered: Vec<FindingType> = grouped.keys().copied().collect();
+        ordered.sort_by_key(|ft| ft.display_order());
 
-        for ft in &order {
+        for ft in &ordered {
             if let Some(values) = grouped.get(ft) {
                 let (_icon, color) = ft.with_symbol();
 

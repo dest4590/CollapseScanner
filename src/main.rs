@@ -7,8 +7,6 @@ mod rules;
 mod scanner;
 mod types;
 mod utils;
-#[cfg(feature = "web-ui")]
-mod web;
 
 use {
     crate::{
@@ -49,6 +47,8 @@ struct FileConfig {
     exclude: Option<Vec<String>>,
     find: Option<Vec<String>>,
     threads: Option<usize>,
+    max_depth: Option<usize>,
+    max_strings: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -63,7 +63,8 @@ struct ResolvedArgs {
     find: Vec<String>,
     threads: usize,
     config: Option<PathBuf>,
-    web: bool,
+    max_depth: usize,
+    max_strings: usize,
 }
 
 #[derive(Parser, Clone)]
@@ -121,8 +122,14 @@ struct Args {
         help = "Worker threads to use; 0 lets Rayon decide"
     )]
     threads: Option<usize>,
-    #[clap(long, action = clap::ArgAction::SetTrue, help = "Run simple web UI (drag-and-drop)")]
-    web: bool,
+    #[clap(long, value_parser, help = "Max nested archive depth (default: 2)")]
+    max_depth: Option<usize>,
+    #[clap(
+        long,
+        value_parser,
+        help = "Max strings to scan per class (default: 2000)"
+    )]
+    max_strings: Option<usize>,
 }
 
 struct ProgressReporter {
@@ -192,20 +199,20 @@ impl ProgressReporter {
                     if !is_bar {
                         progress_bar.finish_and_clear();
                         progress_bar = ProgressBar::new(snapshot.total as u64);
+                        progress_bar.set_style(bar_style.clone());
                         is_bar = true;
                         progress_bar.enable_steady_tick(Duration::from_millis(100));
                     }
 
-                    progress_bar.set_style(bar_style.clone());
                     progress_bar.set_position(snapshot.current.min(snapshot.total) as u64);
                 } else {
                     if is_bar {
                         progress_bar.finish_and_clear();
                         progress_bar = ProgressBar::new_spinner();
+                        progress_bar.set_style(spinner_style.clone());
                         is_bar = false;
                         progress_bar.enable_steady_tick(Duration::from_millis(100));
                     }
-                    progress_bar.set_style(spinner_style.clone());
                 }
 
                 progress_bar.set_prefix(prefix);
@@ -243,7 +250,7 @@ impl ProgressReporter {
         }
 
         if io::stderr().is_terminal() {
-            eprintln!("");
+            eprintln!();
         }
     }
 }
@@ -295,8 +302,15 @@ fn resolve_cli_arguments(args: Args) -> Result<ResolvedArgs, Box<dyn std::error:
             .threads
             .or_else(|| config.as_ref().and_then(|cfg| cfg.threads))
             .unwrap_or(0),
+        max_depth: args
+            .max_depth
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.max_depth))
+            .unwrap_or(2),
+        max_strings: args
+            .max_strings
+            .or_else(|| config.as_ref().and_then(|cfg| cfg.max_strings))
+            .unwrap_or(2000),
         config: args.config,
-        web: args.web,
     })
 }
 
@@ -311,6 +325,8 @@ fn build_scanner_options(
         exclude_patterns: args.exclude.clone(),
         find_patterns: args.find.clone(),
         progress,
+        max_nested_archive_depth: args.max_depth,
+        max_strings_per_class: args.max_strings,
     }
 }
 
@@ -357,61 +373,17 @@ fn mode_description(mode: DetectionMode) -> &'static str {
 }
 
 fn print_scan_info(path: &Path, args: &ResolvedArgs, scanner: &CollapseScanner) {
+    let mode_label = args.mode.to_string();
     print_scan_config(
         path,
-        args.mode.to_string(),
+        &mode_label,
         mode_description(args.mode),
-        &args.config,
+        args.config.as_deref(),
         &scanner.options.exclude_patterns,
         &scanner.options.find_patterns,
-        &scanner.options.ignore_keywords_file,
+        scanner.options.ignore_keywords_file.as_deref(),
         args.verbose,
     );
-}
-
-fn calculate_scan_score(results: &[&ScanResult]) -> (u8, &'static str, &'static str) {
-    if results.is_empty() {
-        return (1, "green", "MINIMAL RISK");
-    }
-
-    let mut weighted_sum: u32 = 0;
-    let mut weight_total: u32 = 0;
-    let mut max_danger_score: u8 = 0;
-
-    for result in results {
-        let weight = if result.danger_score >= 8 { 5 } else { 1 };
-        weighted_sum += (result.danger_score as u32) * weight;
-        weight_total += weight;
-        max_danger_score = max_danger_score.max(result.danger_score);
-    }
-
-    let weighted_avg = (weighted_sum as f32 / weight_total as f32).round() as u8;
-    let score = if max_danger_score == 10 {
-        10
-    } else {
-        weighted_avg.max(max_danger_score).clamp(1, 10)
-    };
-
-    let score_color = match score {
-        1 => "green",
-        2 => "bright_green",
-        3 => "cyan",
-        4 => "bright_cyan",
-        5 => "yellow",
-        6 => "bright_yellow",
-        7 => "magenta",
-        8..=10 => "red",
-        _ => "green",
-    };
-
-    let risk_level = match score {
-        8..=10 => "HIGH RISK",
-        5..=7 => "MODERATE RISK",
-        3..=4 => "LOW RISK",
-        _ => "MINIMAL RISK",
-    };
-
-    (score, score_color, risk_level)
 }
 
 fn should_show_progress_bar(args: &ResolvedArgs) -> bool {
@@ -423,28 +395,14 @@ fn build_json_result(
     significant_results: &[&ScanResult],
     elapsed: Duration,
 ) -> serde_json::Value {
-    let (score, _, risk_level) = calculate_scan_score(significant_results);
+    let (score, _, risk_level) = crate::output::calculate_scan_score(significant_results);
     let total_findings: usize = significant_results.iter().map(|r| r.matches.len()).sum();
-
     let compact_results: Vec<serde_json::Value> = significant_results
         .iter()
-        .map(|r| {
-            let findings: Vec<serde_json::Value> = r
-                .matches
-                .iter()
-                .map(|(ft, val)| json!({"type": format!("{:?}", ft), "value": val}))
-                .collect();
-
-            json!({
-                "file_path": r.file_path,
-                "danger_score": r.danger_score,
-                "danger_explanation": r.danger_explanation,
-                "findings": findings
-            })
-        })
+        .map(|r| r.to_json_report())
         .collect();
 
-    json!({
+    serde_json::json!({
         "scan_time_seconds": elapsed.as_secs_f64(),
         "total_files_scanned": results.len(),
         "files_with_findings": significant_results.len(),
@@ -542,20 +500,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scanner = CollapseScanner::new(options.clone())?;
     let path = validate_scan_path(&args)?;
 
-    if args.web {
-        #[cfg(feature = "web-ui")]
-        {
-            web::run_web_ui(scanner, options)?;
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "web-ui"))]
-        {
-            eprintln!("web UI requested but binary built without `web-ui` feature");
-            std::process::exit(1);
-        }
-    }
-
     if !args.json {
         print_scan_info(&path, &args, &scanner);
         if !should_show_progress_bar(&args) {
@@ -587,7 +531,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             render_text_report(significant_results, &path, &scanner, elapsed);
 
-            let found_custom_jvm = *scanner.found_custom_jvm_indicator.lock().unwrap();
+            let found_custom_jvm = scanner
+                .found_custom_jvm_indicator
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(false);
             if found_custom_jvm {
                 println!("\n(!) {}", "Custom JVM warning".yellow().bold());
                 println!(
