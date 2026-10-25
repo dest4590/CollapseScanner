@@ -1,23 +1,11 @@
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, RwLock};
 
-pub static SAFE_STRING_CACHE: LazyLock<Arc<RwLock<HashSet<String>>>> =
-    LazyLock::new(|| Arc::new(RwLock::new(HashSet::new())));
-
-pub fn is_cached_safe_string(s: &str) -> bool {
-    if let Ok(cache) = SAFE_STRING_CACHE.read() {
-        cache.contains(s)
-    } else {
+    pub fn is_cached_safe_string(_s: &str) -> bool {
         false
     }
-}
 
-pub fn cache_safe_string(s: &str) {
-    if let Ok(mut cache) = SAFE_STRING_CACHE.write() {
-        cache.insert(s.to_string());
-    }
-}
+    pub fn cache_safe_string(_s: &str) {}
 
 pub fn calculate_detection_hash(data: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
