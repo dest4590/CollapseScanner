@@ -48,10 +48,13 @@ fn process_jar(input_path: &str, output_path: &str) -> ZipResult<()> {
     let mut entries_info = Vec::with_capacity(num_entries);
     for i in 0..num_entries {
         let mut entry = archive.by_index(i)?;
-        let original_name = entry.enclosed_name().map_or_else(
-            || entry.name().to_string(),
-            |path| path.to_string_lossy().into_owned(),
-        );
+        let original_name = match entry.enclosed_name() {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => entry.name().map_or_else(
+                |_| String::from_utf8_lossy(entry.name_raw()).into_owned(),
+                |name| name.into_owned(),
+            ),
+        };
 
         let new_name = if original_name.ends_with(".class/") {
             original_name[0..original_name.len() - 1].to_string()
