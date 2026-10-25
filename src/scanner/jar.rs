@@ -34,41 +34,45 @@ impl CollapseScanner {
 
         let file_data = std::fs::read(jar_path)?;
 
-        let indices_to_scan: Vec<usize> = {
-            let mut archive = ZipArchive::new(Cursor::new(&file_data[..]))?;
-            let mut indices = Vec::new();
-            let mut skipped = 0;
+        let mut archive = ZipArchive::new(Cursor::new(&file_data[..]))?;
+        let mut entries_to_scan = Vec::new();
+        let mut skipped = 0;
 
-            for i in 0..archive.len() {
-                let entry = match archive.by_index(i) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                let name = match entry.enclosed_name() {
-                    Some(p) => get_archive_entry_name(&p.to_string_lossy()),
-                    None => get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
-                };
-                if !entry.is_dir() && self.should_scan(&name) {
-                    indices.push(i);
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(f) => f,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let name = match entry.enclosed_name() {
+                Some(p) => get_archive_entry_name(&p.to_string_lossy()),
+                None => get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
+            };
+            if !entry.is_dir() && self.should_scan(&name) {
+                let file_size = entry.size() as usize;
+                let mut buffer = Vec::with_capacity(file_size);
+                if entry.read_to_end(&mut buffer).is_ok() {
+                    let compressed_size = entry.compressed_size();
+                    entries_to_scan.push((name, buffer, compressed_size));
                 } else {
                     skipped += 1;
                 }
+            } else {
+                skipped += 1;
             }
+        }
 
-            if self.options.verbose {
-                println!(
-                    "[+] JAR indexed: {} entries ({} skipped)",
-                    archive.len(),
-                    skipped
-                );
-            }
-            indices
-        };
+        if self.options.verbose {
+            println!(
+                "[+] JAR indexed: {} entries ({} skipped)",
+                archive.len(),
+                skipped
+            );
+        }
 
-        let total_files = indices_to_scan.len();
+        let total_files = entries_to_scan.len();
         let processed_count = Arc::new(AtomicUsize::new(0));
 
         if let Some(ref prog_arc) = self.options.progress {
@@ -80,29 +84,9 @@ impl CollapseScanner {
             }
         }
 
-        let results: Vec<ScanResult> = indices_to_scan
-            .par_iter()
-            .flat_map(|&i| {
-                let mut archive = match ZipArchive::new(Cursor::new(&file_data[..])) {
-                    Ok(a) => a,
-                    Err(_) => return Vec::new(),
-                };
-                let mut entry = match archive.by_index(i) {
-                    Ok(f) => f,
-                    Err(_) => return Vec::new(),
-                };
-                let entry_name = match entry.enclosed_name() {
-                    Some(p) => get_archive_entry_name(&p.to_string_lossy()),
-                    None => get_archive_entry_name(&String::from_utf8_lossy(entry.name_raw())),
-                };
-                let file_size = entry.size() as usize;
-                let mut buffer = Vec::with_capacity(file_size);
-                if entry.read_to_end(&mut buffer).is_err() {
-                    processed_count.fetch_add(1, Ordering::Relaxed);
-                    return Vec::new();
-                }
-                let compressed_size = entry.compressed_size();
-
+        let results: Vec<ScanResult> = entries_to_scan
+            .into_par_iter()
+            .flat_map(|(entry_name, buffer, compressed_size)| {
                 let progress_name = entry_name.clone();
                 if let Some(ref prog_arc) = self.options.progress {
                     if let Ok(mut gp) = prog_arc.lock() {
@@ -280,7 +264,7 @@ impl CollapseScanner {
                 &relative_name,
                 &nested_buffer,
                 Some(compressed_size),
-                archive_depth,
+                archive_depth + 1,
             )?);
         }
 

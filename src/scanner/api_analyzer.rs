@@ -233,11 +233,6 @@ impl ApiAnalyzer {
                 return format!("Method/Field: {}", method.name);
             }
         }
-        for field in &details.fields {
-            if field.name.len() > 5 && !field.name.contains('/') {
-                return field.name.clone();
-            }
-        }
         "".to_string()
     }
 
